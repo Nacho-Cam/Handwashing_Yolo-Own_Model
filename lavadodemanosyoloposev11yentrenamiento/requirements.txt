@@ -1,0 +1,18 @@
+# Core ML/CV libraries
+torch # O especifica versión, ej: torch==2.1.0
+ultralytics # O especifica versión, ej: ultralytics==8.0.150
+opencv-python # Use standard version for GUI support (imshow)
+scikit-learn # Para métricas de evaluación
+pandas # Para manejo de datos (labels.csv)
+numpy # Operaciones numéricas
+
+# MQTT
+paho-mqtt # Cliente MQTT
+
+# Utilities (Opcionales para Docker si no se usan en inferencia pura)
+tqdm # Barras de progreso
+seaborn # Para graficar matriz de confusión
+matplotlib # Para graficar matriz de confusión
+
+# Nota: Instala PyTorch (con o sin CUDA) por separado si prefieres,
+# siguiendo las instrucciones en pytorch.org, y luego comenta 'torch' aquí.
