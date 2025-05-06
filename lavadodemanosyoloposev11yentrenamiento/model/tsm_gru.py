@@ -33,9 +33,12 @@ class TSM_GRU(nn.Module):
         # and handle the view (N*num_segments, T_per_segment, C) internally.
         self.tsm_module = TemporalShift(n_segment=self.tsm_segments, n_div=self.tsm_shift_div, inplace=False)
 
+        # GRU input dimension should be the original feature dimension
+        gru_input_dim = input_dim # Corrected: GRU input dim is not divided by tsm_segments
+
         # GRU Layer
         self.gru = nn.GRU(
-            input_size=input_dim,
+            input_size=gru_input_dim,
             hidden_size=hidden_dim,
             num_layers=num_layers_gru,
             batch_first=True,

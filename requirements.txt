@@ -6,6 +6,10 @@ scikit-learn # Para métricas de evaluación
 pandas # Para manejo de datos (labels.csv)
 numpy # Operaciones numéricas
 
+# Web Framework and Server
+Flask
+gunicorn
+
 # MQTT
 paho-mqtt # Cliente MQTT
 
