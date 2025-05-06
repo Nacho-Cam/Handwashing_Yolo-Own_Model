@@ -60,7 +60,7 @@ class HandWashDataset(Dataset):
         filepath = os.path.join(self.keypoints_dir, npy_filename)
 
         try:
-            keypoints = np.load(filepath) # Carga como (T, 51) para YOLOv8 pose (17 keypoints)
+            keypoints = np.load(filepath) # Carga como (T, 63) para YOLOv8 pose (21 keypoints)
         except Exception as e:
             print(f"Error al cargar {filepath}: {e}. Devolviendo tensor nulo.")
             keypoints = np.zeros((self.sequence_length or 1, FEATURE_DIM), dtype=np.float32)

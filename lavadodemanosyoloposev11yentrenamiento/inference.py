@@ -23,9 +23,9 @@ WINDOW_SECONDS = 5 # Duración de la ventana deslizante en segundos
 SEQUENCE_LENGTH = TARGET_FPS * WINDOW_SECONDS # 150 frames
 MIN_SOAP_SECONDS = 20 # Duración mínima requerida para la fase de enjabonado
 
-# Número de keypoints que produce el modelo YOLOv8 pose (17 para cuerpo completo)
-YOLOV8_POSE_KEYPOINTS = 17
-FEATURE_DIM = YOLOV8_POSE_KEYPOINTS * 3  # 51: x, y, confidence para cada keypoint
+# Número de keypoints que produce el modelo YOLOv8 pose (21 para manos)
+YOLOV8_POSE_KEYPOINTS = 21
+FEATURE_DIM = YOLOV8_POSE_KEYPOINTS * 3  # 63: x, y, confidence para cada keypoint
 
 # MQTT Config
 MQTT_BROKER = "localhost" # Cambiar por la IP/hostname de tu broker MQTT
@@ -74,16 +74,16 @@ def extract_keypoints_frame(frame, yolo_model, clahe):
     # Inferencia YOLO-Pose
     results = yolo_model(clahe_frame_bgr, verbose=False)
 
-    # Inicializar vector de características (51 = 17 keypoints * 3)
+    # Inicializar vector de características (63 = 21 keypoints * 3)
     frame_kpts = np.zeros(FEATURE_DIM)
 
     if results and len(results) > 0 and results[0].keypoints is not None and results[0].keypoints.shape[1] > 0:
         # Obtener los datos de keypoints
         kpts_data = results[0].keypoints.data
             
-        # Seleccionar la persona principal (la primera detección)
+        # Seleccionar la mano principal (la primera detección)
         if kpts_data.shape[0] > 0:
-            kpts = kpts_data[0].cpu().numpy()  # Primera detección: (17, 3)
+            kpts = kpts_data[0].cpu().numpy()  # Primera detección: (21, 3)
                 
             # Aplanar los keypoints: [x1,y1,c1, x2,y2,c2, ...]
             frame_kpts[0::3] = kpts[:, 0]  # x
@@ -282,7 +282,7 @@ def main(args):
                 print(f"Advertencia: La longitud de secuencia de inferencia ({SEQUENCE_LENGTH}) difiere de la de entrenamiento ({train_seq_len}). Ajustando a {train_seq_len}.")
                 SEQUENCE_LENGTH = train_seq_len
         else:
-            print("Advertencia: No se encontraron args en checkpoint. Usando defaults para TSM_GRU con dimensión de entrada 51.")
+            print("Advertencia: No se encontraron args en checkpoint. Usando defaults para TSM_GRU con dimensión de entrada 63.")
             # Ensure these defaults match evaluate.py fallbacks
             tsm_gru_model = TSM_GRU(input_dim=FEATURE_DIM,
                                     hidden_dim=256, # Match evaluate.py fallback

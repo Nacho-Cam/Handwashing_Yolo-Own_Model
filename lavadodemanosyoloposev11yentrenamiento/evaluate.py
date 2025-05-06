@@ -12,8 +12,8 @@ import argparse
 from model.tsm_gru import TSM_GRU
 from train_tsm_gru import HandWashDataset # Reutilizar la clase Dataset
 
-# Dimensión de características por frame (17 keypoints * 3 valores = 51)
-FEATURE_DIM = 51
+# Dimensión de características por frame (21 keypoints * 3 valores = 63)
+FEATURE_DIM = 63
 
 # Mapeo de etiquetas a nombres (para el reporte)
 LABEL_NAMES = {0: 'Mojar', 1: 'Enjabonado', 2: 'Frotado', 3: 'Aclarado'}
