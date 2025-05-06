@@ -115,8 +115,9 @@ def main(args):
                         num_layers_gru=model_args.get('gru_layers', args.gru_layers),
                         tsm_segments=model_args.get('tsm_segments', args.tsm_segments),
                         tsm_shift_div=model_args.get('tsm_shift_div', args.tsm_shift_div),
-                        bidirectional=is_bidirectional, # ---> Use the flag < ---
-                        use_attention=use_attention,   # ---> Use the flag < ---
+                        bidirectional=is_bidirectional, 
+                        use_attention=use_attention,
+                        use_batch_norm=model_args.get('use_batch_norm', args.use_batch_norm),
                         dropout=0.0 # Usar dropout 0 para evaluación
                        ).to(device)
     else:
@@ -127,8 +128,9 @@ def main(args):
                         num_layers_gru=args.gru_layers,
                         tsm_segments=args.tsm_segments,
                         tsm_shift_div=args.tsm_shift_div,
-                        bidirectional=args.bidirectional, # ---> Use CLI arg < ---
-                        use_attention=args.use_attention,   # ---> Use CLI arg < ---
+                        bidirectional=args.bidirectional, 
+                        use_attention=args.use_attention,
+                        use_batch_norm=args.use_batch_norm,
                         dropout=0.0 # Usar dropout 0 para evaluación
                        ).to(device)
 
@@ -233,6 +235,7 @@ if __name__ == "__main__":
     parser.add_argument('--tsm-shift-div', type=int, default=3, help='Divisor shift TSM (fallback).') # Changed default from 8 to 3
     parser.add_argument('--bidirectional', action='store_true', help='Usar GRU bidireccional (fallback/override).')
     parser.add_argument('--use-attention', action='store_true', help='Usar mecanismo de atención (fallback/override).')
+    parser.add_argument('--use-batch-norm', action='store_true', help='Usar batch normalization (fallback/override).')
 
     args = parser.parse_args()
 

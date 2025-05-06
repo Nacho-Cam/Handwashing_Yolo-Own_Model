@@ -27,3 +27,4 @@ venv/
 Thumbs.db
 lavadodemanosyoloposev11yentrenamiento/data/raw_videos/HandWashDataset/HandWashDataset/HandwashList.txt
 *.mp4
+/lavadodemanosyoloposev11yentrenamiento

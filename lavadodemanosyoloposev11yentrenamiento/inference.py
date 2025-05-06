@@ -7,13 +7,16 @@ import time
 import argparse
 import os
 from collections import deque
+import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 
 # Importar clases necesarias
 from model.tsm_gru import TSM_GRU
 
 # --- Configuración --- 
 DEFAULT_MODEL_PATH = 'best_tsm_gru.pth'
-DEFAULT_YOLO_MODEL = 'YOLO11n-pose.pt' # Modelo YOLO para extracción de keypoints (in the same directory)
+DEFAULT_YOLO_MODEL = 'yolo11n-pose-hands.pt' # Modelo YOLO afinado para manos
 WEBCAM_INDEX = 0 # Índice de la cámara USB (puede variar)
 TARGET_FPS = 30
 WINDOW_SECONDS = 5 # Duración de la ventana deslizante en segundos
@@ -34,6 +37,11 @@ MQTT_TOPIC_PHASE = "handwash/phase"  # Tópico para publicar la fase detectada
 LABEL_NAMES = {0: 'Mojar', 1: 'Enjabonado', 2: 'Frotado', 3: 'Aclarado', -1: 'Desconocido'}
 LABEL_COLORS = {0: (255, 0, 0), 1: (0, 255, 0), 2: (0, 0, 255), 3: (255, 255, 0), -1: (128, 128, 128)}
 SOAP_LABEL_INDEX = 1 # Índice de la etiqueta "Enjabonado"
+
+# Configuración del gráfico de rendimiento
+GRAPH_WIDTH = 400
+GRAPH_HEIGHT = 200
+GRAPH_POINTS = 100  # Número de puntos de datos a mostrar en el gráfico
 
 # --- Funciones Auxiliares --- 
 def connect_mqtt(broker, port):
@@ -82,7 +90,72 @@ def extract_keypoints_frame(frame, yolo_model, clahe):
             frame_kpts[1::3] = kpts[:, 1]  # y
             frame_kpts[2::3] = kpts[:, 2]  # confidence
 
-    return frame_kpts
+    return frame_kpts, results
+
+def create_performance_graph(soap_durations, min_duration, width=GRAPH_WIDTH, height=GRAPH_HEIGHT):
+    """Crea un gráfico de rendimiento mostrando la duración de enjabonado."""
+    fig = Figure(figsize=(width/100, height/100), dpi=100)
+    canvas = FigureCanvas(fig)
+    ax = fig.add_subplot(111)
+    
+    # Limitar los datos a los últimos GRAPH_POINTS puntos
+    if len(soap_durations) > GRAPH_POINTS:
+        soap_durations = soap_durations[-GRAPH_POINTS:]
+    
+    # Generar valores del eje x (número de secuencia)
+    x = list(range(len(soap_durations)))
+    
+    # Dibujar la línea de duración mínima
+    ax.axhline(y=min_duration, color='r', linestyle='--', alpha=0.7, label=f'Mínimo ({min_duration}s)')
+    
+    # Dibujar la duración de enjabonado
+    if soap_durations:
+        ax.plot(x, soap_durations, marker='o', linestyle='-', color='green', markersize=3)
+        ax.fill_between(x, soap_durations, alpha=0.2, color='green')
+    
+    # Configurar el gráfico
+    ax.set_ylim(bottom=0)
+    ax.set_title('Duración de Enjabonado (s)')
+    ax.set_xlabel('Secuencia')
+    ax.set_ylabel('Tiempo (s)')
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    
+    fig.tight_layout()
+    
+    # Convertir a imagen
+    canvas.draw()
+    img = np.frombuffer(canvas.tostring_rgb(), dtype=np.uint8)
+    img = img.reshape((height, width, 3))
+    
+    return img
+
+def draw_keypoints_on_frame(frame, results, focus_on_hands=True):
+    """Dibuja los keypoints en el frame, enfocándose en las manos si se especifica."""
+    if results and len(results) > 0:
+        annotated_frame = results[0].plot()
+        
+        # Si queremos enfocarnos solo en las manos, modificar la visualización
+        if focus_on_hands:
+            # Primero, extraer solo los keypoints de la muñeca, manos y dedos si están disponibles
+            # Nota: En función del modelo YOLO, puede que necesites ajustar estos índices
+            hand_indices = [0, 9, 10]  # 9 y 10 son los índices de las muñecas en COCO, 0 para nariz (referencia)
+            
+            # Dibujar solo los keypoints relevantes para las manos
+            if results[0].keypoints is not None:
+                keypoints = results[0].keypoints.data
+                for det_idx in range(keypoints.shape[0]):  # Para cada detección
+                    kpts = keypoints[det_idx].cpu().numpy()
+                    for idx in hand_indices:
+                        x, y, conf = kpts[idx]
+                        if conf > 0.5:  # Solo si la confianza es suficiente
+                            # Dibujar círculo grande para los puntos clave de las manos
+                            color = (0, 255, 0) if idx in [9, 10] else (255, 0, 0)  # Verde para manos, rojo para nariz
+                            cv2.circle(annotated_frame, (int(x), int(y)), 8, color, -1)
+                            cv2.circle(annotated_frame, (int(x), int(y)), 10, (255, 255, 255), 2)
+        
+        return annotated_frame
+    return frame
 
 # --- Clase para manejar el estado del lavado --- 
 class HandwashMonitor:
@@ -95,6 +168,7 @@ class HandwashMonitor:
         self.alert_cooldown = 10 # Segundos de cooldown para no spamear alertas
         self.alert_active = False
         self.max_soap_duration_achieved = 0 # Máxima duración continua de enjabonado vista
+        self.soap_durations = []  # Historial de duraciones de enjabonado
 
     def update_phase(self, predicted_phase):
         current_time = time.time()
@@ -107,6 +181,8 @@ class HandwashMonitor:
                 duration = current_time - self.phase_start_time
                 self.max_soap_duration_achieved = max(self.max_soap_duration_achieved, duration)
                 print(f"Fase 'Enjabonado' terminada. Duración: {duration:.1f}s. Máxima duración vista: {self.max_soap_duration_achieved:.1f}s")
+                # Almacenar la duración para gráfica
+                self.soap_durations.append(duration)
                 # Resetear alerta si estaba activa por duración insuficiente
                 if self.alert_active:
                      print("Alerta de duración desactivada.")
@@ -266,6 +342,18 @@ def main(args):
                               soap_label_index=SOAP_LABEL_INDEX)
     last_phase_prediction = -1
 
+    # Obtener dimensiones del vídeo para el layout
+    ret, temp_frame = cap.read()
+    if not ret:
+        print("Error al leer el primer frame. Verificar webcam.")
+        return
+    
+    height, width = temp_frame.shape[:2]
+    
+    # Preparar el layout para mostrar el vídeo y el gráfico
+    display_width = width
+    display_height = height + GRAPH_HEIGHT + 50  # Altura adicional para el gráfico y margen
+    
     print("Iniciando bucle de inferencia...")
     try:
         while True:
@@ -276,7 +364,8 @@ def main(args):
                 print("Error al leer frame de la webcam.")
                 break
 
-            current_keypoints = extract_keypoints_frame(frame, yolo_model, clahe)
+            # Extraer keypoints y obtener resultados del modelo YOLO
+            current_keypoints, yolo_results = extract_keypoints_frame(frame, yolo_model, clahe)
             keypoints_buffer.append(current_keypoints)
 
             predicted_phase_index = -1
@@ -300,20 +389,44 @@ def main(args):
                 current_phase_index = last_phase_prediction
 
             if args.show_video:
-                if np.sum(current_keypoints) > 0:
-                    for i in range(0, FEATURE_DIM, 3):
-                        x, y, conf = current_keypoints[i:i+3]
-                        if conf > 0.2:
-                            cv2.circle(frame, (int(x), int(y)), 3, (0, 255, 255), -1)
-
+                # Dibujar keypoints en el frame
+                annotated_frame = draw_keypoints_on_frame(frame, yolo_results, focus_on_hands=True)
+                
+                # Añadir información de fase actual
                 phase_name = LABEL_NAMES.get(current_phase_index, "Iniciando...")
                 color = LABEL_COLORS.get(current_phase_index, (255, 255, 255))
-                cv2.putText(frame, f"Fase: {phase_name}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2, cv2.LINE_AA)
+                
+                # Crear una imagen compuesta con el vídeo y el gráfico
+                display_img = np.zeros((display_height, display_width, 3), dtype=np.uint8)
+                
+                # Poner el frame con keypoints en la parte superior
+                display_img[:height, :width] = annotated_frame
+                
+                # Añadir texto de fase y estado
+                cv2.putText(display_img, f"Fase: {phase_name}", (10, height + 30), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2, cv2.LINE_AA)
                 
                 if monitor.alert_active:
-                     cv2.putText(frame, "ALERTA: ENJABONADO CORTO", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2, cv2.LINE_AA)
+                    cv2.putText(display_img, "ALERTA: ENJABONADO CORTO", (width//2, height + 30), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2, cv2.LINE_AA)
+                
+                # Crear y añadir el gráfico de rendimiento en la parte inferior
+                min_soap_duration = MIN_SOAP_SECONDS
+                performance_graph = create_performance_graph(
+                    monitor.soap_durations, 
+                    min_soap_duration,
+                    width=display_width, 
+                    height=GRAPH_HEIGHT
+                )
+                
+                # Colocar el gráfico en la parte inferior
+                graph_y_offset = height + 50
+                if performance_graph.shape[0] + graph_y_offset <= display_height:
+                    display_img[graph_y_offset:graph_y_offset+performance_graph.shape[0], 
+                                :performance_graph.shape[1]] = performance_graph
 
-                cv2.imshow('Handwash Inference', frame)
+                # Mostrar la imagen compuesta
+                cv2.imshow('Handwash Monitor', display_img)
                 if cv2.waitKey(1) & 0xFF == ord('q'):
                     break
 
@@ -345,4 +458,8 @@ if __name__ == "__main__":
     parser.add_argument('--use-attention', action='store_true', help='Usar mecanismo de atención (fallback/override).')
 
     args = parser.parse_args()
+    
+    # Establecer show_video a True por defecto, ya que queremos ver los keypoints
+    args.show_video = True
+    
     main(args)

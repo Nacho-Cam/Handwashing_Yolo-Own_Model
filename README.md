@@ -1,6 +1,6 @@
 # Sistema de Supervisión Automática de Lavado de Manos
 
-Este proyecto implementa un sistema completo para la supervisión automática de lavado de manos usando visión artificial y aprendizaje profundo. Utiliza el modelo YOLOv8 Pose para la detección de keypoints corporales y un modelo TSM-GRU (Temporal Shift Module + GRU) para clasificar las fases del lavado.
+Este proyecto implementa un sistema completo para la supervisión automática de lavado de manos usando visión artificial y aprendizaje profundo. Utiliza un modelo YOLO Pose afinado para la detección de keypoints de manos y un modelo TSM-GRU (Temporal Shift Module + GRU) para clasificar las fases del lavado.
 
 ![Hand Washing Classification](https://www.cdc.gov/handwashing/images/wash-your-hands-steps-1280x720.jpg)
 
@@ -8,190 +8,228 @@ Este proyecto implementa un sistema completo para la supervisión automática de
 
 ```
 .
-├── data/
-│   ├── raw_videos/          # Videos originales del dataset
-│   ├── keypoints_train/     # Keypoints extraídos para entrenamiento (.npy)
-│   └── keypoints_val/       # Keypoints extraídos para validación (.npy)
-├── docker/
-│   └── Dockerfile           # Configuración para despliegue en Docker
-├── model/
-│   ├── temporal_shift.py    # Implementación del módulo Temporal Shift
-│   └── tsm_gru.py           # Modelo TSM-GRU para clasificación de fases
-├── scripts/
-│   └── extract_keypoints.py # Script para extraer keypoints de videos
-├── evaluate.py              # Script para evaluar el modelo entrenado
-├── inference.py             # Script para inferencia en tiempo real
-├── requirements.txt         # Dependencias del proyecto
-└── train_tsm_gru.py         # Script para entrenar el modelo
+├── lavadodemanosyoloposev11yentrenamiento/
+│   ├── data/
+│   │   ├── raw_videos/                  # Videos originales del dataset
+│   │   ├── keypoints_train_finetuned/   # Keypoints (21) para entrenamiento (.npy)
+│   │   └── keypoints_val_finetuned/     # Keypoints (21) para validación (.npy)
+│   ├── model/
+│   │   ├── temporal_shift.py            # Implementación del módulo Temporal Shift
+│   │   └── tsm_gru.py                   # Modelo TSM-GRU para clasificación de fases
+│   ├── scripts/
+│   │   ├── extract_keypoints_finetuned.py # Script para extraer keypoints de manos (21)
+│   │   └── compare_models.py            # Script para comparar modelos (si aplica)
+│   ├── use/
+│   │   └── train_handwash_pipeline.py   # Script para ejecutar el pipeline completo
+│   ├── evaluate.py                      # Script para evaluar el modelo entrenado
+│   ├── hand-keypoints.yaml              # Configuración del dataset para afinado de YOLO
+│   ├── train_tsm_gru.py                 # Script para entrenar el modelo TSM-GRU
+│   ├── yolo11n-pose-hands.pt            # Modelo YOLO afinado para manos (21 keypoints)
+│   ├── yolo11n-pose.pt                  # Modelo YOLO base (17 keypoints)
+│   └── best_tsm_gru.pth                 # Mejor modelo TSM-GRU entrenado
+├── webcam_handwash_monitor.py           # Script para inferencia en tiempo real con webcam
+├── requirements.txt                     # Dependencias del proyecto
+├── LICENSE
+└── README.md
 ```
 
 ## Instalación
 
-1. **Instalar dependencias** (desde la raíz del proyecto):
-   ```bash
-   pip install -r lavadodemanosyoloposev11yentrenamiento/requirements.txt
-   ```
+1.  **Clonar el repositorio** (si aún no lo has hecho).
+2.  **Instalar dependencias** (desde la raíz del proyecto):
+    ```bash
+    pip install -r requirements.txt
+    ```
 
-2. **Dependencias específicas**:
-   ```
-   torch>=2.0.0
-   torchvision>=0.15.0
-   ultralytics>=8.0.0
-   opencv-python>=4.7.0
-   numpy>=1.24.0
-   pandas>=2.0.0
-   matplotlib>=3.7.0
-   seaborn>=0.12.0
-   scikit-learn>=1.2.0
-   tqdm>=4.65.0
-   paho-mqtt>=2.2.0
-   ```
+    Dependencias clave:
+    ```
+    torch>=2.0.0
+    torchvision>=0.15.0
+    ultralytics>=8.0.0
+    opencv-python>=4.7.0
+    numpy>=1.24.0
+    pandas>=2.0.0
+    matplotlib>=3.7.0
+    seaborn>=0.12.0
+    scikit-learn>=1.2.0
+    tqdm>=4.65.0
+    # paho-mqtt (si se usa MQTT en webcam_handwash_monitor.py)
+    ```
 
-   > **Nota**: Para versiones específicas de PyTorch con soporte CUDA, instala PyTorch por separado siguiendo las instrucciones en pytorch.org.
+    > **Nota**: Para versiones específicas de PyTorch con soporte CUDA, instala PyTorch por separado siguiendo las instrucciones en [pytorch.org](https://pytorch.org/).
+
+## Pipeline de Entrenamiento Automatizado
+
+El script `train_handwash_pipeline.py` automatiza la mayoría de los pasos. Se recomienda usar este script para un flujo de trabajo consistente.
+
+(Desde la raíz del proyecto):
+```bash
+python lavadodemanosyoloposev11yentrenamiento/use/train_handwash_pipeline.py [OPCIONES]
+```
+
+Ejemplo para usar el modelo YOLO afinado para manos, saltar el afinado (si ya está hecho) y proceder con la extracción y entrenamiento:
+```bash
+python lavadodemanosyoloposev11yentrenamiento/use/train_handwash_pipeline.py --use-finetuned-model --skip-finetune
+```
+
+Consulta los argumentos del script para más opciones:
+```bash
+python lavadodemanosyoloposev11yentrenamiento/use/train_handwash_pipeline.py --help
+```
 
 ## Implementación de Modelos
 
-### 1. YOLOv8 Pose
+### 1. YOLO Pose (Afinado para Manos)
 
-Este proyecto utiliza el modelo preentrenado YOLOv8 Pose de Ultralytics para detectar keypoints corporales en cada frame de video.
+Este proyecto utiliza un modelo YOLO Pose afinado específicamente para la detección de keypoints de manos.
 
-- Modelo: `yolov8n-pose.pt` (versión nano para mayor velocidad)
-- Keypoints detectados: 17 keypoints de cuerpo completo
-- **Keypoints Seleccionados**: Para mejorar la relevancia, solo se utilizan 7 keypoints: nariz, hombros, codos y muñecas (índices 0, 5, 6, 7, 8, 9, 10).
-- **Normalización**: Las coordenadas (x, y) de los keypoints seleccionados se normalizan restando el punto medio de los hombros para mayor robustez.
-- **Dimensión de características**: 21 (7 keypoints × 3 valores [nx, ny, confianza])
+-   Modelo: `lavadodemanosyoloposev11yentrenamiento/yolo11n-pose-hands.pt`
+-   Keypoints detectados: 21 keypoints por mano.
+-   **Dimensión de características**: 63 (21 keypoints × 3 valores [x, y, confianza])
 
 ### 2. Modelo TSM-GRU
 
 El modelo de clasificación temporal combina:
 
-- **Módulo de Desplazamiento Temporal (TSM)**: Permite la captura de información temporal al intercambiar parcialmente características entre frames adyacentes.
-- **Unidad Recurrente GRU**: Procesa secuencias largas capturando dependencias temporales.
+-   **Módulo de Desplazamiento Temporal (TSM)**: Permite la captura de información temporal al intercambiar parcialmente características entre frames adyacentes.
+-   **Unidad Recurrente GRU**: Procesa secuencias largas capturando dependencias temporales.
+-   Opcionalmente puede incluir mecanismos de atención y GRU bidireccional.
 
-## Preparación de Datos
+## Preparación de Datos (Manual)
 
-1. **Descargar el dataset** (desde la raíz del proyecto):
-   ```bash
-   # Crear directorio para los videos (si no existe)
-   mkdir -p lavadodemanosyoloposev11yentrenamiento/data/raw_videos
+Si no usas el pipeline, sigue estos pasos:
 
-   # Descargar el Hand Wash Dataset desde Kaggle o cualquier otra fuente
-   # y colocar los videos en lavadodemanosyoloposev11yentrenamiento/data/raw_videos/HandWashDataset/
-   ```
+1.  **Descargar el dataset de videos**:
+    Coloca tus videos de lavado de manos en subdirectorios dentro de `lavadodemanosyoloposev11yentrenamiento/data/raw_videos/`. Se recomienda organizar los videos en carpetas por fase (ej. `phase0`, `phase1`, `rubpalms`) ya que el script de extracción puede inferir etiquetas de estas carpetas.
 
-2. **Extracción de Keypoints** (desde la raíz del proyecto):
-   ```bash
-   python lavadodemanosyoloposev11yentrenamiento/scripts/extract_keypoints.py
-   ```
-   
-   Este script:
-   - Lee los videos del dataset
-   - Aplica CLAHE (Contrast Limited Adaptive Histogram Equalization) para mejorar contraste
-   - Extrae 17 keypoints por frame usando YOLOv8 Pose
-   - **Selecciona y normaliza los 7 keypoints relevantes (nariz, hombros, codos, muñecas)**
-   - Guarda los keypoints procesados (21 características) como archivos .npy en las carpetas train/val
-   - Crea archivos labels.csv con las etiquetas de clase
+2.  **Extracción de Keypoints de Manos (21 keypoints)**:
+    Usa el script `extract_keypoints_finetuned.py` con el modelo `yolo11n-pose-hands.pt`.
 
-   Parámetros opcionales (ajustar rutas si es necesario):
-   ```
-   # Example: Run from root, specifying paths relative to the script's expected location
-   python lavadodemanosyoloposev11yentrenamiento/scripts/extract_keypoints.py --raw-dir lavadodemanosyoloposev11yentrenamiento/data/raw_videos/HandWashDataset --train-dir lavadodemanosyoloposev11yentrenamiento/data/keypoints_train --val-dir lavadodemanosyoloposev11yentrenamiento/data/keypoints_val --model-path lavadodemanosyoloposev11yentrenamiento/yolov8n-pose.pt
-   ```
+    (Desde la raíz del proyecto):
+    ```bash
+    python lavadodemanosyoloposev11yentrenamiento/scripts/extract_keypoints_finetuned.py --model-path lavadodemanosyoloposev11yentrenamiento/yolo11n-pose-hands.pt --raw-dir lavadodemanosyoloposev11yentrenamiento/data/raw_videos/ --train-dir lavadodemanosyoloposev11yentrenamiento/data/keypoints_train_finetuned --val-dir lavadodemanosyoloposev11yentrenamiento/data/keypoints_val_finetuned
+    ```
+    Este script:
+    -   Lee los videos del dataset.
+    -   Aplica CLAHE (Contrast Limited Adaptive Histogram Equalization) para mejorar contraste.
+    -   Extrae 21 keypoints por mano usando el modelo YOLO Pose especificado.
+    -   Guarda los keypoints (63 características) como archivos .npy.
+    -   Crea archivos `labels.csv` con las etiquetas de clase (inferidas de nombres de archivo/directorio).
 
-## Entrenamiento
+## Entrenamiento del Modelo TSM-GRU (Manual)
 
 (Desde la raíz del proyecto):
 ```bash
-python lavadodemanosyoloposev11yentrenamiento/train_tsm_gru.py
+python lavadodemanosyoloposev11yentrenamiento/train_tsm_gru.py [OPCIONES]
 ```
 
-El modelo se entrenará utilizando:
-- Arquitectura TSM-GRU (Temporal Shift Module + GRU)
-- Optimizador Adam (lr=1e-4, weight_decay=1e-5)
-- CrossEntropyLoss
-- 50 épocas por defecto
-- Métrica F1 para monitorizar rendimiento
-- El mejor modelo se guardará como `best_tsm_gru.pth`
+El modelo se entrenará usando la arquitectura TSM-GRU. El mejor modelo se guardará como `lavadodemanosyoloposev11yentrenamiento/best_tsm_gru.pth`.
 
-Parámetros opcionales (ajustar rutas si es necesario):
-```
-# Example: Run from root, specifying paths relative to the script's expected location
-python lavadodemanosyoloposev11yentrenamiento/train_tsm_gru.py --train-dir lavadodemanosyoloposev11yentrenamiento/data/keypoints_train --val-dir lavadodemanosyoloposev11yentrenamiento/data/keypoints_val --save-path lavadodemanosyoloposev11yentrenamiento/best_tsm_gru.pth
---seq-len           # Longitud de secuencia (default: 150 frames)
---batch-size        # Tamaño de batch (default: 16)
---epochs            # Número de épocas (default: 50)
---lr                # Learning rate (default: 1e-4)
---weight-decay      # Weight decay (default: 1e-5)
---use-class-weights # Usar pesos de clase
---use-lr-scheduler  # Usar scheduler de LR
---input-dim         # Dimensión de entrada (default: 21 para 7 keypoints seleccionados)
---hidden-dim        # Dimensión oculta GRU (default: 256)
---gru-layers        # Número de capas GRU (default: 2)
---tsm-segments      # Segmentos TSM (default: 8)
---tsm-shift-div     # Divisor TSM (default: 3)
---dropout           # Dropout (default: 0.5)
---bidirectional     # Usar GRU bidireccional
---use-attention     # Usar atención
+Parámetros importantes (ajustar rutas y valores según sea necesario):
+```bash
+python lavadodemanosyoloposev11yentrenamiento/train_tsm_gru.py \
+    --train-dir lavadodemanosyoloposev11yentrenamiento/data/keypoints_train_finetuned \
+    --train-labels lavadodemanosyoloposev11yentrenamiento/data/keypoints_train_finetuned/labels.csv \
+    --val-dir lavadodemanosyoloposev11yentrenamiento/data/keypoints_val_finetuned \
+    --val-labels lavadodemanosyoloposev11yentrenamiento/data/keypoints_val_finetuned/labels.csv \
+    --save-path lavadodemanosyoloposev11yentrenamiento/best_tsm_gru.pth \
+    --input-dim 63 \
+    --num-classes 4 \
+    --seq-len 150 \
+    --batch-size 16 \
+    --epochs 100 \
+    --lr 1e-4 \
+    --hidden-dim 256 \
+    --gru-layers 2 \
+    --tsm-segments 8 \
+    --tsm-shift-div 3 \
+    --dropout 0.5 \
+    --bidirectional \
+    --use-attention \
+    --use-class-weights \
+    --use-lr-scheduler
+    # ... y más opciones disponibles, ver --help
 ```
 
-## Evaluación
+## Evaluación del Modelo TSM-GRU (Manual)
 
 (Desde la raíz del proyecto):
 ```bash
-python lavadodemanosyoloposev11yentrenamiento/evaluate.py --bidirectional --use-attention
+python lavadodemanosyoloposev11yentrenamiento/evaluate.py --model-path lavadodemanosyoloposev11yentrenamiento/best_tsm_gru.pth --val-dir lavadodemanosyoloposev11yentrenamiento/data/keypoints_val_finetuned --val-labels lavadodemanosyoloposev11yentrenamiento/data/keypoints_val_finetuned/labels.csv --input-dim 63 --num-classes 4 [OPCIONES_ARQUITECTURA_MODELO]
 ```
-
 Esto generará:
-- Una matriz de confusión (`confusion_matrix.png`)
-- Un reporte de clasificación con precisión, recall y F1-score para cada fase
+-   Una matriz de confusión (`lavadodemanosyoloposev11yentrenamiento/confusion_matrix_eval.png`)
+-   Un reporte de clasificación con precisión, recall y F1-score para cada fase.
 
-**Rendimiento Obtenido (Ejemplo)**:
-Con la configuración final (7 keypoints normalizados, TSM-GRU bidireccional con atención, y parámetros optimizados), se alcanzó una **precisión del 85%** en el conjunto de validación.
+Asegúrate de pasar los argumentos de arquitectura (`--bidirectional`, `--use-attention`, `--hidden-dim`, etc.) que coincidan con el modelo entrenado si no están guardados en el checkpoint.
 
-Parámetros opcionales (ajustar rutas si es necesario):
-```
-# Example: Run from root, specifying paths relative to the script's expected location
-python lavadodemanosyoloposev11yentrenamiento/evaluate.py --model-path lavadodemanosyoloposev11yentrenamiento/best_tsm_gru.pth --val-dir lavadodemanosyoloposev11yentrenamiento/data/keypoints_val --cm-path lavadodemanosyoloposev11yentrenamiento/confusion_matrix_eval.png
-# Fallback args (bidirectional, use-attention, hidden-dim, etc.)
-```
+## Inferencia en Tiempo Real con Webcam
 
-## Inferencia en Tiempo Real
+Usa el script `webcam_handwash_monitor.py`.
 
 (Desde la raíz del proyecto):
 ```bash
-python lavadodemanosyoloposev11yentrenamiento/inference.py --show-video
+python webcam_handwash_monitor.py
 ```
 
 Funcionalidades:
-- Captura video desde webcam
-- Aplica CLAHE y extrae keypoints usando YOLOv8 Pose
-- Clasifica fases en ventanas deslizantes de 5 segundos
-- Emite alertas si la fase de enjabonado dura menos de 20 segundos
-- Opcionalmente publica eventos vía MQTT
+-   Captura video desde webcam.
+-   Aplica CLAHE y extrae keypoints de manos usando `yolo11n-pose-hands.pt`.
+-   Clasifica fases en ventanas deslizantes.
+-   Muestra la fase detectada y la calidad del lavado en tiempo real.
 
-Parámetros opcionales (ajustar rutas si es necesario):
-```
-# Example: Run from root, specifying paths relative to the script's expected location
-python lavadodemanosyoloposev11yentrenamiento/inference.py --model-path lavadodemanosyoloposev11yentrenamiento/best_tsm_gru.pth --yolo-model lavadodemanosyoloposev11yentrenamiento/YOLO11n-pose.pt --webcam-index      # Índice de la cámara (default: 0)
---mqtt-broker       # Dirección del broker MQTT (default: localhost)
---mqtt-port         # Puerto del broker MQTT (default: 1883)
---show-video        # Mostrar video con predicciones
+Parámetros opcionales (ver el script para más detalles):
+```bash
+python webcam_handwash_monitor.py \
+    --yolo-model lavadodemanosyoloposev11yentrenamiento/yolo11n-pose-hands.pt \
+    --tsm-gru-model lavadodemanosyoloposev11yentrenamiento/best_tsm_gru.pth \
+    --webcam-index 0
 ```
 
-## Etiquetas de Clases
-- 0: Mojar
-- 1: Enjabonado
-- 2: Frotado
-- 3: Aclarado
+## Etiquetas de Clases (Ejemplo)
+-   0: No Handwashing / Other
+-   1: Phase 1 (e.g., Wet/Soap)
+-   2: Phase 2 (e.g., Rubbing)
+-   3: Phase 3 (e.g., Rinsing)
+    *(Estas etiquetas son configurables en `webcam_handwash_monitor.py` y dependen de cómo se entrenó el modelo TSM-GRU)*
 
-## Cambios Respecto al Modelo Original
+## Fine-tuning del Modelo YOLO Pose (Opcional pero Recomendado)
 
-Este proyecto utiliza YOLOv8 Pose para extraer keypoints corporales en lugar del modelo YOLOv11 mencionado originalmente, que puede no estar disponible públicamente. La implementación actual:
+Para obtener el modelo `yolo11n-pose-hands.pt` (o similar), puedes afinar un modelo YOLO Pose base (como `yolo11n-pose.pt`) en un dataset específico de manos.
 
-- Usa `yolov8n-pose.pt` de Ultralytics
-- Procesa 7 keypoints seleccionados y normalizados (21 características)
-- Es compatible con la biblioteca Ultralytics estándar
-- Requiere PyTorch y CUDA para una ejecución óptima
+1.  **Prepara el Dataset**:
+    *   Ultralytics puede descargar automáticamente datasets conocidos. Para el dataset `hand-keypoints` de Ultralytics, necesitarás un archivo YAML (p.ej., `lavadodemanosyoloposev11yentrenamiento/hand-keypoints.yaml`):
+        ```yaml
+        # Contenido para lavadodemanosyoloposev11yentrenamiento/hand-keypoints.yaml
+        # Ruta al directorio del dataset (Ultralytics lo descargará aquí si no existe)
+        # path: ../datasets/hand-keypoints # Ajusta si tu estructura es diferente
+        # O usa la descarga automática:
+        download: https://github.com/ultralytics/yolov5/releases/download/v1.0/hand-keypoints.zip
+
+        train: hand-keypoints/images/train
+        val: hand-keypoints/images/val
+
+        # Metadatos del dataset de keypoints
+        kpt_shape: [21, 2]  # 21 keypoints, 2 dimensiones (x, y)
+        flip_idx: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20] # Ajustar según la definición de keypoints
+
+        # Clases (solo una clase: 'hand')
+        names:
+          0: hand
+        ```
+        *Nota: Verifica la documentación de Ultralytics y la estructura del dataset `hand-keypoints` para los valores exactos de `kpt_shape` y `flip_idx`.*
+
+2.  **Ejecuta el Fine-tuning**:
+    *   Puedes usar la línea de comandos de Ultralytics. Desde la raíz del proyecto:
+        ```bash
+        yolo pose train data=lavadodemanosyoloposev11yentrenamiento/hand-keypoints.yaml model=lavadodemanosyoloposev11yentrenamiento/yolo11n-pose.pt epochs=100 imgsz=640 project=lavadodemanosyoloposev11yentrenamiento/runs/pose name=finetune_hands
+        ```
+    *   Ajusta `epochs`, `imgsz` y otros hiperparámetros según necesites.
+
+3.  **Usa el Modelo Afinado**:
+    *   El modelo afinado se guardará (por defecto) en `lavadodemanosyoloposev11yentrenamiento/runs/pose/finetune_hands/weights/best.pt`.
+    *   Copia este archivo a `lavadodemanosyoloposev11yentrenamiento/yolo11n-pose-hands.pt` (o el nombre que prefieras) para usarlo en los scripts.
+    *   Este modelo afinado detectará 21 keypoints por mano, resultando en `INPUT_DIM = 63` para el modelo TSM-GRU.
 
 ## Despliegue con Docker
 
@@ -202,9 +240,11 @@ docker build -t handwash-monitor -f lavadodemanosyoloposev11yentrenamiento/docke
 
 # Ejecutar el contenedor (ejemplo para Linux con webcam en /dev/video0)
 # Ajusta --device según tu sistema operativo si es necesario
+# Para Windows, el acceso a la webcam desde Docker puede ser complejo.
 docker run --rm -it --device=/dev/video0:/dev/video0 handwash-monitor
 ```
+Asegúrate de que el `Dockerfile` y los scripts referenciados (como `inference.py` o `webcam_handwash_monitor.py`) usen las rutas correctas a los modelos dentro del contenedor. El `Dockerfile` actual usa `inference.py` y `yolo11n-pose.pt`. Deberás ajustarlo si `webcam_handwash_monitor.py` y `yolo11n-pose-hands.pt` son los predeterminados.
 
 ## Créditos
 
-Este proyecto utiliza el Hand Wash Dataset, diseñado para reconocer las diferentes fases del lavado de manos siguiendo las pautas de la OMS.
+Este proyecto utiliza el Hand Wash Dataset (o similar), diseñado para reconocer las diferentes fases del lavado de manos siguiendo las pautas de la OMS.

@@ -13,8 +13,8 @@ from tqdm import tqdm
 import argparse
 from collections import Counter
 
-# Dimensión de características por frame (17 keypoints * 3 valores = 51)
-FEATURE_DIM = 51
+# Dimensión de características por frame (21 keypoints * 3 valores = 63)
+FEATURE_DIM = 63
 
 # --- Dataset Class ---
 class HandWashDataset(Dataset):
@@ -86,8 +86,112 @@ class HandWashDataset(Dataset):
 
         return keypoints_tensor, label_tensor
 
+# --- Augmentations for Time Series ---
+def apply_time_series_augmentation(keypoints_batch, labels_batch, args):
+    """
+    Apply various augmentations to the keypoints sequences.
+    
+    Args:
+        keypoints_batch (tensor): Batch of keypoint sequences, shape (B, T, C)
+        labels_batch (tensor): Batch of labels, shape (B,)
+        args: Command line arguments with augmentation flags
+    
+    Returns:
+        augmented_keypoints (tensor): Augmented batch
+        augmented_labels (tensor): Possibly modified labels
+    """
+    device = keypoints_batch.device
+    batch_size = keypoints_batch.shape[0]
+    
+    # Apply mixup if enabled
+    if args.mixup and batch_size > 1:
+        return apply_mixup(keypoints_batch, labels_batch, alpha=args.mixup_alpha)
+    
+    # Apply other augmentations if enabled
+    if args.augment:
+        augmented_keypoints = keypoints_batch.clone()
+        
+        for i in range(batch_size):
+            # Only apply to valid sequences (non-zero)
+            if torch.sum(torch.abs(keypoints_batch[i])) > 0:
+                # Randomly select an augmentation
+                aug_type = np.random.choice(['jitter', 'scaling', 'time_warp', 'none'], 
+                                          p=[0.3, 0.3, 0.3, 0.1])
+                
+                if aug_type == 'jitter':
+                    noise = torch.randn_like(keypoints_batch[i]) * 0.05  # 5% noise
+                    augmented_keypoints[i] = keypoints_batch[i] + noise
+                
+                elif aug_type == 'scaling':
+                    # Apply random scaling between 0.9 and 1.1
+                    scale_factor = torch.FloatTensor(1).uniform_(0.9, 1.1).to(device)
+                    augmented_keypoints[i] = keypoints_batch[i] * scale_factor
+                
+                elif aug_type == 'time_warp':
+                    # Temporal warping - stretch or compress parts of the sequence
+                    seq_len = keypoints_batch.shape[1]
+                    if seq_len > 10:  # Only apply to longer sequences
+                        # Create indices for temporal stretching
+                        src_idx = torch.arange(seq_len, device=device).float()
+                        
+                        # Random warping intensity
+                        warp_intensity = torch.FloatTensor(1).uniform_(0.9, 1.1).to(device)
+                        
+                        # Create random warping function
+                        warp_center = torch.randint(low=seq_len//4, high=3*seq_len//4, size=(1,)).to(device)
+                        warp_dist = torch.abs(src_idx - warp_center)
+                        warp_factor = 1 + (warp_intensity - 1) * torch.exp(-warp_dist / (seq_len / 4))
+                        
+                        # Apply warping to indices
+                        dst_idx = torch.cumsum(warp_factor, dim=0) - warp_factor[0]
+                        dst_idx = dst_idx / dst_idx[-1] * (seq_len - 1)
+                        
+                        # Ensure monotonicity
+                        dst_idx, _ = torch.sort(dst_idx)
+                        
+                        # Use grid_sample for smooth interpolation
+                        src_keypoints = keypoints_batch[i].unsqueeze(0)  # (1, T, C)
+                        src_keypoints = src_keypoints.permute(0, 2, 1)  # (1, C, T)
+                        
+                        # Create sampling grid
+                        grid = torch.zeros(1, 1, seq_len, 1, device=device)
+                        grid[0, 0, :, 0] = 2 * dst_idx / (seq_len - 1) - 1  # Scale to [-1, 1]
+                        
+                        # Sample at warped locations
+                        warped = torch.nn.functional.grid_sample(
+                            src_keypoints, grid, mode='bilinear', align_corners=True
+                        )
+                        
+                        augmented_keypoints[i] = warped.permute(0, 2, 1).squeeze(0)
+        
+        return augmented_keypoints, labels_batch
+    
+    # Return original data if no augmentation applied
+    return keypoints_batch, labels_batch
+
+def apply_mixup(x, y, alpha=0.2):
+    """Apply mixup augmentation to the batch."""
+    batch_size = x.shape[0]
+    device = x.device
+    
+    # Create one-hot labels
+    y_onehot = torch.zeros(batch_size, y.max().item() + 1, device=device)
+    y_onehot.scatter_(1, y.unsqueeze(1), 1)
+    
+    # Sample lambda from beta distribution
+    lam = np.random.beta(alpha, alpha)
+    
+    # Shuffle indices
+    index = torch.randperm(batch_size).to(device)
+    
+    # Create mixed samples
+    mixed_x = lam * x + (1 - lam) * x[index]
+    mixed_y = lam * y_onehot + (1 - lam) * y_onehot[index]
+    
+    return mixed_x, mixed_y
+
 # --- Funciones de Entrenamiento y Validación ---
-def train_epoch(model, dataloader, criterion, optimizer, device):
+def train_epoch(model, dataloader, criterion, optimizer, device, args):
     model.train()
     running_loss = 0.0
     total_samples = 0
@@ -104,10 +208,26 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
         inputs = inputs[valid_mask]
         labels = labels[valid_mask]
 
-        optimizer.zero_grad()
-
-        outputs = model(inputs)
-        loss = criterion(outputs, labels)
+        # Apply augmentations if enabled
+        if args.augment or args.mixup:
+            inputs, augmented_labels = apply_time_series_augmentation(inputs, labels, args)
+            
+            # If we got soft labels from mixup
+            if args.mixup and augmented_labels.dim() > 1:
+                optimizer.zero_grad()
+                outputs = model(inputs)
+                # Use soft targets
+                loss = torch.sum(-augmented_labels * torch.log_softmax(outputs, dim=1), dim=1).mean()
+            else:
+                # Normal training with hard labels
+                optimizer.zero_grad()
+                outputs = model(inputs)
+                loss = criterion(outputs, labels)
+        else:
+            # Normal training without augmentation
+            optimizer.zero_grad()
+            outputs = model(inputs)
+            loss = criterion(outputs, labels)
 
         loss.backward()
         optimizer.step()
@@ -115,9 +235,15 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
         running_loss += loss.item() * inputs.size(0)
         total_samples += inputs.size(0)
 
+        # For metrics, always use hard labels
         _, predicted = torch.max(outputs.data, 1)
-        all_preds.extend(predicted.cpu().numpy())
-        all_labels.extend(labels.cpu().numpy())
+        if args.mixup and augmented_labels.dim() > 1:
+            # For mixup, use the original labels for metrics
+            all_preds.extend(predicted.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+        else:
+            all_preds.extend(predicted.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
 
         pbar.set_postfix({'loss': running_loss / total_samples})
 
@@ -229,9 +355,17 @@ def main(args):
                    tsm_shift_div=args.tsm_shift_div,
                    dropout=args.dropout,
                    bidirectional=args.bidirectional,
-                   use_attention=args.use_attention).to(device)
+                   use_attention=args.use_attention,
+                   use_batch_norm=args.use_batch_norm).to(device)
 
-    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    # Choose loss function based on arguments
+    if args.use_focal_loss:
+        from model.tsm_gru import FocalLoss
+        print(f"Usando Focal Loss (alpha={args.focal_alpha}, gamma={args.focal_gamma}) para manejar desbalance de clases")
+        criterion = FocalLoss(alpha=args.focal_alpha, gamma=args.focal_gamma)
+    else:
+        criterion = nn.CrossEntropyLoss(weight=class_weights)
+        
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     if args.use_lr_scheduler:
@@ -250,7 +384,7 @@ def main(args):
     for epoch in range(args.epochs):
         print(f"\nEpoch {epoch+1}/{args.epochs}")
 
-        train_loss, train_f1 = train_epoch(model, train_loader, criterion, optimizer, device)
+        train_loss, train_f1 = train_epoch(model, train_loader, criterion, optimizer, device, args)
         val_loss, val_f1 = validate_epoch(model, val_loader, criterion, device)
 
         train_losses.append(train_loss)
@@ -304,10 +438,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Entrena un modelo TSM-GRU para clasificación de lavado de manos.')
 
     # Paths relative to the script's directory (lavadodemanosyoloposev11yentrenamiento)
-    parser.add_argument('--train-dir', type=str, default='data/keypoints_train', help='Directorio con keypoints de entrenamiento (.npy).')
-    parser.add_argument('--train-labels', type=str, default='data/keypoints_train/labels.csv', help='Archivo CSV de etiquetas de entrenamiento.')
-    parser.add_argument('--val-dir', type=str, default='data/keypoints_val', help='Directorio con keypoints de validación (.npy).')
-    parser.add_argument('--val-labels', type=str, default='data/keypoints_val/labels.csv', help='Archivo CSV de etiquetas de validación.')
+    parser.add_argument('--train-dir', type=str, default='C:\\Users\\nycca\\OneDrive\\Documentos\\NACHO\\Universidad\\Curso 3\\sistemasDePercepcionArtificialYVisionArtificial\\Ejercicio_1\\Proyecto final\\Handwashing_Yolo-Own_Model\\lavadodemanosyoloposev11yentrenamiento\\data\\keypoints_train_finetuned', help='Directorio con keypoints de entrenamiento (.npy).')
+    parser.add_argument('--train-labels', type=str, default='C:\\Users\\nycca\\OneDrive\\Documentos\\NACHO\\Universidad\\Curso 3\\sistemasDePercepcionArtificialYVisionArtificial\\Ejercicio_1\\Proyecto final\\Handwashing_Yolo-Own_Model\\lavadodemanosyoloposev11yentrenamiento\\data\\keypoints_train_finetuned\\labels.csv', help='Archivo CSV de etiquetas de entrenamiento.')
+    parser.add_argument('--val-dir', type=str, default='C:\\Users\\nycca\\OneDrive\\Documentos\\NACHO\\Universidad\\Curso 3\\sistemasDePercepcionArtificialYVisionArtificial\\Ejercicio_1\\Proyecto final\\Handwashing_Yolo-Own_Model\\lavadodemanosyoloposev11yentrenamiento\\data\\keypoints_val_finetuned', help='Directorio con keypoints de validación (.npy).')
+    parser.add_argument('--val-labels', type=str, default='C:\\Users\\nycca\\OneDrive\\Documentos\\NACHO\\Universidad\\Curso 3\\sistemasDePercepcionArtificialYVisionArtificial\\Ejercicio_1\\Proyecto final\\Handwashing_Yolo-Own_Model\\lavadodemanosyoloposev11yentrenamiento\\data\\keypoints_val_finetuned\\labels.csv', help='Archivo CSV de etiquetas de validación.')
     # Save path relative to the script's directory
     parser.add_argument('--save-path', type=str, default='best_tsm_gru.pth', help='Ruta para guardar el mejor checkpoint del modelo.')
 
@@ -320,7 +454,7 @@ if __name__ == "__main__":
     parser.add_argument('--use-lr-scheduler', action='store_true', help='Usar scheduler de tasa de aprendizaje.') # Added LR scheduler option
     parser.add_argument('--num-workers', type=int, default=0, help='Número de workers para DataLoader (0 en Windows suele ser más estable).')
 
-    parser.add_argument('--input-dim', type=int, default=FEATURE_DIM, help='Dimensión de entrada (17 kpts * 3).')
+    parser.add_argument('--input-dim', type=int, default=FEATURE_DIM, help='Dimensión de entrada (21 kpts * 3).')
     parser.add_argument('--hidden-dim', type=int, default=256, help='Dimensión oculta de la GRU.') # Increased hidden dim
     parser.add_argument('--num-classes', type=int, default=4, help='Número de clases (fases de lavado).')
     parser.add_argument('--gru-layers', type=int, default=2, help='Número de capas GRU.') # Increased GRU layers
@@ -329,6 +463,13 @@ if __name__ == "__main__":
     parser.add_argument('--dropout', type=float, default=0.5, help='Dropout antes de la capa final.') # Increased dropout
     parser.add_argument('--bidirectional', action='store_true', help='Usar GRU bidireccional.')
     parser.add_argument('--use-attention', action='store_true', help='Usar mecanismo de atención.')
+    parser.add_argument('--use-batch-norm', action='store_true', help='Usar batch normalization para input features.')
+    parser.add_argument('--use-focal-loss', action='store_true', help='Usar Focal Loss en lugar de CrossEntropy para manejar mejor el desbalance de clases.')
+    parser.add_argument('--focal-alpha', type=float, default=0.25, help='Parámetro alpha para Focal Loss (si se usa).')
+    parser.add_argument('--focal-gamma', type=float, default=2.0, help='Parámetro gamma para Focal Loss (si se usa).')
+    parser.add_argument('--mixup', action='store_true', help='Usar mixup augmentation durante entrenamiento.')
+    parser.add_argument('--mixup-alpha', type=float, default=0.2, help='Parámetro alpha para mixup (si se usa).')
+    parser.add_argument('--augment', action='store_true', help='Aplicar augmentación de datos (TP/FP) durante entrenamiento.')
 
     args = parser.parse_args()
 
