@@ -165,18 +165,20 @@ Asegúrate de pasar los argumentos de arquitectura (`--bidirectional`, `--use-at
 
 ## Inferencia en Tiempo Real con Webcam
 
-Usa el script `webcam_handwash_monitor.py`.
+Usa el script `webcam_handwash_monitor.py` para monitoreo y evaluación automática de la calidad del lavado de manos.
 
 (Desde la raíz del proyecto):
 ```bash
 python webcam_handwash_monitor.py
 ```
 
-Funcionalidades:
--   Captura video desde webcam.
--   Aplica CLAHE y extrae keypoints de manos usando `yolo11n-pose-hands.pt`.
--   Clasifica fases en ventanas deslizantes.
--   Muestra la fase detectada y la calidad del lavado en tiempo real.
+Características principales:
+- Captura video desde webcam en tiempo real.
+- Aplica CLAHE y extrae keypoints de manos usando el modelo YOLO pose afinado (`yolo11n-pose-hands.pt`).
+- Clasifica fases del lavado usando TSM-GRU y muestra la fase detectada en pantalla.
+- Evalúa la calidad del lavado (por duración de fases) y la muestra en la parte inferior del video.
+- Overlay de información clara: fase actual, tiempo en fase, duración por fase, calidad general.
+- Todos los textos en la interfaz de video están en español y son descriptivos.
 
 Parámetros opcionales (ver el script para más detalles):
 ```bash
@@ -185,6 +187,19 @@ python webcam_handwash_monitor.py \
     --tsm-gru-model lavadodemanosyoloposev11yentrenamiento/best_tsm_gru.pth \
     --webcam-index 0
 ```
+
+---
+
+## Cambios recientes en la visualización
+- Los textos superpuestos en el video ahora son más claros y están en español:
+    - "Fase actual: ..."
+    - "Tiempo en fase: ..."
+    - "Duración por fase (s): ..."
+    - "Calidad general: ..."
+- El color de la calidad general es verde si es "Good" o "Excellent", rojo en otros casos.
+- Se omite la fase "No Handwashing" en el resumen de duración por fases.
+
+---
 
 ## Etiquetas de Clases (Ejemplo)
 -   0: No Handwashing / Other

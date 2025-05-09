@@ -12,9 +12,57 @@ from model.tsm_gru import TSM_GRU # Importar el modelo
 from tqdm import tqdm
 import argparse
 from collections import Counter
+import random
+import json
+from datetime import datetime
+try:
+    from torch.utils.tensorboard import SummaryWriter
+    TENSORBOARD_AVAILABLE = True
+except ImportError:
+    TENSORBOARD_AVAILABLE = False
 
 # Dimensión de características por frame (21 keypoints * 3 valores = 63)
 FEATURE_DIM = 63
+
+# --- Set random seed for reproducibility ---
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+# --- Early stopping utility ---
+class EarlyStopping:
+    def __init__(self, patience=10, verbose=False, delta=0):
+        self.patience = patience
+        self.verbose = verbose
+        self.counter = 0
+        self.best_score = None
+        self.early_stop = False
+        self.val_f1_max = -float('inf')
+        self.delta = delta
+
+    def __call__(self, val_f1, model, path):
+        score = val_f1
+        if self.best_score is None:
+            self.best_score = score
+            self.save_checkpoint(model, path)
+        elif score < self.best_score + self.delta:
+            self.counter += 1
+            if self.verbose:
+                print(f'EarlyStopping counter: {self.counter} out of {self.patience}')
+            if self.counter >= self.patience:
+                self.early_stop = True
+        else:
+            self.best_score = score
+            self.save_checkpoint(model, path)
+            self.counter = 0
+
+    def save_checkpoint(self, model, path):
+        torch.save(model.state_dict(), path)
+        if self.verbose:
+            print(f'Saved model checkpoint to {path}')
 
 # --- Dataset Class ---
 class HandWashDataset(Dataset):
@@ -105,7 +153,7 @@ def apply_time_series_augmentation(keypoints_batch, labels_batch, args):
     
     # Apply mixup if enabled
     if args.mixup and batch_size > 1:
-        return apply_mixup(keypoints_batch, labels_batch, alpha=args.mixup_alpha)
+        return apply_mixup(keypoints_batch, labels_batch, alpha=args.mixup_alpha, num_classes=args.num_classes)
     
     # Apply other augmentations if enabled
     if args.augment:
@@ -149,57 +197,49 @@ def apply_time_series_augmentation(keypoints_batch, labels_batch, args):
                         # Ensure monotonicity
                         dst_idx, _ = torch.sort(dst_idx)
                         
-                        # Use grid_sample for smooth interpolation
-                        src_keypoints = keypoints_batch[i].unsqueeze(0)  # (1, T, C)
-                        src_keypoints = src_keypoints.permute(0, 2, 1)  # (1, C, T)
-                        
-                        # Create sampling grid
-                        grid = torch.zeros(1, 1, seq_len, 1, device=device)
-                        grid[0, 0, :, 0] = 2 * dst_idx / (seq_len - 1) - 1  # Scale to [-1, 1]
-                        
-                        # Sample at warped locations
+                        # Use grid_sample for smooth interpolation (1D as 2D)
+                        src_keypoints = keypoints_batch[i].unsqueeze(0).permute(0, 2, 1).unsqueeze(-1)  # (1, C, T, 1)
+                        grid = torch.zeros(1, seq_len, 1, 2, device=device)  # (N, H, W, 2)
+                        grid[..., 0] = (2 * dst_idx / (seq_len - 1) - 1).unsqueeze(0).unsqueeze(-1)  # x-coord (temporal)
+                        grid[..., 1] = 0  # y-coord (dummy, always 0)
                         warped = torch.nn.functional.grid_sample(
                             src_keypoints, grid, mode='bilinear', align_corners=True
                         )
                         
-                        augmented_keypoints[i] = warped.permute(0, 2, 1).squeeze(0)
+                        augmented_keypoints[i] = warped.squeeze(0).squeeze(-1).permute(1, 0)
         
         return augmented_keypoints, labels_batch
     
     # Return original data if no augmentation applied
     return keypoints_batch, labels_batch
 
-def apply_mixup(x, y, alpha=0.2):
+def apply_mixup(x, y, alpha=0.2, num_classes=None):
     """Apply mixup augmentation to the batch."""
     batch_size = x.shape[0]
     device = x.device
-    
-    # Create one-hot labels
-    y_onehot = torch.zeros(batch_size, y.max().item() + 1, device=device)
+    if num_classes is None:
+        num_classes = y.max().item() + 1
+    y_onehot = torch.zeros(batch_size, num_classes, device=device)
     y_onehot.scatter_(1, y.unsqueeze(1), 1)
-    
-    # Sample lambda from beta distribution
     lam = np.random.beta(alpha, alpha)
-    
-    # Shuffle indices
     index = torch.randperm(batch_size).to(device)
-    
-    # Create mixed samples
     mixed_x = lam * x + (1 - lam) * x[index]
     mixed_y = lam * y_onehot + (1 - lam) * y_onehot[index]
-    
     return mixed_x, mixed_y
 
 # --- Funciones de Entrenamiento y Validación ---
-def train_epoch(model, dataloader, criterion, optimizer, device, args):
+def train_epoch(model, dataloader, criterion, optimizer, device, args, writer=None, epoch=0):
     model.train()
     running_loss = 0.0
     total_samples = 0
     all_preds = []
     all_labels = []
+    batch_count = 0
 
     pbar = tqdm(dataloader, desc="Entrenamiento")
     for inputs, labels in pbar:
+        batch_count += 1
+
         inputs, labels = inputs.to(device), labels.to(device)
 
         valid_mask = labels != -1
@@ -237,7 +277,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device, args):
 
         # For metrics, always use hard labels
         _, predicted = torch.max(outputs.data, 1)
-        if args.mixup and augmented_labels.dim() > 1:
+        if args.mixup and 'augmented_labels' in locals() and augmented_labels.dim() > 1:
             # For mixup, use the original labels for metrics
             all_preds.extend(predicted.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
@@ -247,8 +287,17 @@ def train_epoch(model, dataloader, criterion, optimizer, device, args):
 
         pbar.set_postfix({'loss': running_loss / total_samples})
 
+        # TensorBoard logging
+        if writer is not None:
+            global_step = epoch * len(dataloader) + batch_count
+            writer.add_scalar('Batch/train_loss', loss.item(), global_step)
+
     epoch_loss = running_loss / total_samples if total_samples > 0 else 0
     train_f1 = f1_score(all_labels, all_preds, average='macro', zero_division=0)
+
+    if writer is not None:
+        writer.add_scalar('Epoch/train_loss', epoch_loss, epoch)
+        writer.add_scalar('Epoch/train_f1', train_f1, epoch)
 
     return epoch_loss, train_f1
 
@@ -301,6 +350,8 @@ def validate_epoch(model, dataloader, criterion, device):
 
 # --- Script Principal ---
 def main(args):
+    # Set random seed
+    set_seed(getattr(args, 'seed', 42))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Usando dispositivo: {device}")
 
@@ -373,18 +424,41 @@ def main(args):
             optimizer, mode='max', factor=0.5, patience=5, verbose=True
         )
 
-    print("Iniciando entrenamiento...")
-    best_val_f1 = -1.0
+    # TensorBoard writer
+    writer = None
+    if getattr(args, 'tensorboard', False) and TENSORBOARD_AVAILABLE:
+        log_dir = os.path.join('runs', f'train_{datetime.now().strftime("%Y%m%d_%H%M%S")}')
+        writer = SummaryWriter(log_dir=log_dir)
+        print(f"TensorBoard logging enabled at {log_dir}")
 
+    # Resume from checkpoint
+    start_epoch = 0
+    best_val_f1 = -1.0
+    if getattr(args, 'resume', None):
+        if os.path.exists(args.resume):
+            print(f"Resuming from checkpoint: {args.resume}")
+            checkpoint = torch.load(args.resume, map_location=device)
+            model.load_state_dict(checkpoint['model_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            start_epoch = checkpoint.get('epoch', 0)
+            best_val_f1 = checkpoint.get('f1', -1.0)
+        else:
+            print(f"Checkpoint {args.resume} not found. Starting from scratch.")
+
+    # Early stopping
+    early_stopping = EarlyStopping(patience=getattr(args, 'early_stopping_patience', 15), verbose=True)
+
+    print("Iniciando entrenamiento...")
     train_losses = []
     val_losses = []
     train_f1s = []
     val_f1s = []
 
-    for epoch in range(args.epochs):
+    best_epoch = start_epoch
+    for epoch in range(start_epoch, args.epochs):
         print(f"\nEpoch {epoch+1}/{args.epochs}")
 
-        train_loss, train_f1 = train_epoch(model, train_loader, criterion, optimizer, device, args)
+        train_loss, train_f1 = train_epoch(model, train_loader, criterion, optimizer, device, args, writer, epoch)
         val_loss, val_f1 = validate_epoch(model, val_loader, criterion, device)
 
         train_losses.append(train_loss)
@@ -394,11 +468,16 @@ def main(args):
 
         print(f"Epoch {epoch+1}: Train Loss: {train_loss:.4f} | Train F1: {train_f1:.4f} | Val Loss: {val_loss:.4f} | Val F1: {val_f1:.4f}")
 
+        if writer is not None:
+            writer.add_scalar('Epoch/val_loss', val_loss, epoch)
+            writer.add_scalar('Epoch/val_f1', val_f1, epoch)
+
         if args.use_lr_scheduler:
             scheduler.step(val_f1)
 
         if val_f1 > best_val_f1:
             best_val_f1 = val_f1
+            best_epoch = epoch + 1
             torch.save({
                 'epoch': epoch + 1,
                 'model_state_dict': model.state_dict(),
@@ -409,9 +488,21 @@ def main(args):
             }, args.save_path)
             print(f"Mejor modelo guardado en {args.save_path} (F1: {val_f1:.4f})")
 
+        # Early stopping check
+        early_stopping(val_f1, model, args.save_path)
+        if early_stopping.early_stop:
+            print("Early stopping triggered. Stopping training.")
+            break
+
     print("\nEntrenamiento completado.")
-    print(f"Mejor F1 de validación obtenido: {best_val_f1:.4f}")
+    print(f"Mejor F1 de validación obtenido: {best_val_f1:.4f} en la época {best_epoch}")
     print(f"El mejor modelo se guardó en: {args.save_path}")
+
+    # Save config and best epoch
+    config_save_path = os.path.join(os.path.dirname(args.save_path), f"train_config_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+    with open(config_save_path, 'w') as f:
+        json.dump(vars(args), f, indent=2)
+    print(f"Config saved to {config_save_path}")
 
     plt.figure(figsize=(12, 5))
 
@@ -432,6 +523,9 @@ def main(args):
     plt.tight_layout()
     plt.savefig('training_metrics.png')
     print("Gráficos de métricas guardados como 'training_metrics.png'")
+
+    if writer is not None:
+        writer.close()
 
 
 if __name__ == "__main__":
@@ -456,7 +550,7 @@ if __name__ == "__main__":
 
     parser.add_argument('--input-dim', type=int, default=FEATURE_DIM, help='Dimensión de entrada (21 kpts * 3).')
     parser.add_argument('--hidden-dim', type=int, default=256, help='Dimensión oculta de la GRU.') # Increased hidden dim
-    parser.add_argument('--num-classes', type=int, default=4, help='Número de clases (fases de lavado).')
+    parser.add_argument('--num-classes', type=int, default=7, help='Número de clases (fases de lavado).')
     parser.add_argument('--gru-layers', type=int, default=2, help='Número de capas GRU.') # Increased GRU layers
     parser.add_argument('--tsm-segments', type=int, default=8, help='Número de segmentos TSM.')
     parser.add_argument('--tsm-shift-div', type=int, default=3, help='Divisor de shift TSM (debe ser divisor de input_dim).') # Changed default from 8 to 3
@@ -470,6 +564,10 @@ if __name__ == "__main__":
     parser.add_argument('--mixup', action='store_true', help='Usar mixup augmentation durante entrenamiento.')
     parser.add_argument('--mixup-alpha', type=float, default=0.2, help='Parámetro alpha para mixup (si se usa).')
     parser.add_argument('--augment', action='store_true', help='Aplicar augmentación de datos (TP/FP) durante entrenamiento.')
+    parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility.')
+    parser.add_argument('--tensorboard', action='store_true', help='Enable TensorBoard logging.')
+    parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint to resume training.')
+    parser.add_argument('--early-stopping-patience', type=int, default=15, help='Patience for early stopping.')
 
     args = parser.parse_args()
 

@@ -13,6 +13,7 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 
 # Importar clases necesarias
 from model.tsm_gru import TSM_GRU
+from phases import PHASES, get_phase_name
 
 # --- Configuración --- 
 DEFAULT_MODEL_PATH = 'best_tsm_gru.pth'
@@ -34,9 +35,9 @@ MQTT_TOPIC_STATUS = "handwash/status" # Tópico para publicar OK/ALERTA
 MQTT_TOPIC_PHASE = "handwash/phase"  # Tópico para publicar la fase detectada
 
 # Mapeo de etiquetas a nombres y colores (para visualización)
-LABEL_NAMES = {0: 'Mojar', 1: 'Enjabonado', 2: 'Frotado', 3: 'Aclarado', -1: 'Desconocido'}
-LABEL_COLORS = {0: (255, 0, 0), 1: (0, 255, 0), 2: (0, 0, 255), 3: (255, 255, 0), -1: (128, 128, 128)}
-SOAP_LABEL_INDEX = 1 # Índice de la etiqueta "Enjabonado"
+LABEL_NAMES = {i: PHASES[i] for i in range(len(PHASES))}
+LABEL_COLORS = {i: (int(255*(i%3==0)), int(255*(i%3==1)), int(255*(i%3==2))) for i in range(len(PHASES))}
+SOAP_LABEL_INDEX = 1 # "Apply Soap" es la fase 1
 
 # Configuración del gráfico de rendimiento
 GRAPH_WIDTH = 400
@@ -169,58 +170,48 @@ class HandwashMonitor:
         self.alert_active = False
         self.max_soap_duration_achieved = 0 # Máxima duración continua de enjabonado vista
         self.soap_durations = []  # Historial de duraciones de enjabonado
+        self.phase_total_durations = {i: 0.0 for i in range(len(PHASES))}
 
     def update_phase(self, predicted_phase):
         current_time = time.time()
         alert_status = "OK"
 
         if predicted_phase != self.current_phase:
-            # Cambio de fase
-            if self.current_phase == self.soap_label_index:
-                # Si estábamos enjabonando, verificar duración
+            # Guardar duración de la fase anterior
+            if self.current_phase in self.phase_total_durations and self.phase_start_time is not None:
+                self.phase_total_durations[self.current_phase] += current_time - self.phase_start_time
+            # Si salimos de enjabonado, guardar duración
+            if self.current_phase == self.soap_label_index and self.phase_start_time is not None:
                 duration = current_time - self.phase_start_time
                 self.max_soap_duration_achieved = max(self.max_soap_duration_achieved, duration)
-                print(f"Fase 'Enjabonado' terminada. Duración: {duration:.1f}s. Máxima duración vista: {self.max_soap_duration_achieved:.1f}s")
-                # Almacenar la duración para gráfica
                 self.soap_durations.append(duration)
-                # Resetear alerta si estaba activa por duración insuficiente
                 if self.alert_active:
-                     print("Alerta de duración desactivada.")
-                     self.alert_active = False
-                     alert_status = "OK" # Enviar OK al salir de enjabonado corto
-
-            # Actualizar fase y tiempo de inicio
+                    self.alert_active = False
+                    alert_status = "OK"
+            # Cambio de fase
             print(f"Cambio de fase: {LABEL_NAMES.get(self.current_phase, 'N/A')} -> {LABEL_NAMES.get(predicted_phase, 'N/A')}")
             self.current_phase = predicted_phase
             self.phase_start_time = current_time
-            # Si la nueva fase NO es enjabonado, resetear la duración máxima vista
             if self.current_phase != self.soap_label_index:
                 self.max_soap_duration_achieved = 0
-
         elif predicted_phase == self.soap_label_index:
-            # Seguimos en la fase de enjabonado
+            # Seguimos en enjabonado
             duration = current_time - self.phase_start_time
             self.max_soap_duration_achieved = max(self.max_soap_duration_achieved, duration)
-            # Verificar si la duración actual es suficiente
             if duration < self.min_soap_duration_frames / TARGET_FPS:
-                # Aún no es suficiente, comprobar si emitir alerta
                 if not self.alert_active and (current_time - self.last_alert_time > self.alert_cooldown):
                     pass
             else:
-                # Duración suficiente, si la alerta estaba activa, desactivarla
                 if self.alert_active:
-                    print("Duración mínima de enjabonado alcanzada. Alerta desactivada.")
                     self.alert_active = False
                     alert_status = "OK"
-
         if predicted_phase != self.soap_label_index and self.current_phase == self.soap_label_index:
-             if self.max_soap_duration_achieved < self.min_soap_duration_frames / TARGET_FPS:
-                 if current_time - self.last_alert_time > self.alert_cooldown:
-                     print(f"¡ALERTA! La fase de enjabonado duró solo {self.max_soap_duration_achieved:.1f}s (requerido: {self.min_soap_duration_frames / TARGET_FPS:.1f}s)")
-                     alert_status = "ALERTA_DURACION_INSUFICIENTE"
-                     self.alert_active = True
-                     self.last_alert_time = current_time
-
+            if self.max_soap_duration_achieved < self.min_soap_duration_frames / TARGET_FPS:
+                if current_time - self.last_alert_time > self.alert_cooldown:
+                    print(f"¡ALERTA! La fase de enjabonado duró solo {self.max_soap_duration_achieved:.1f}s (requerido: {self.min_soap_duration_frames / TARGET_FPS:.1f}s)")
+                    alert_status = "ALERTA_DURACION_INSUFICIENTE"
+                    self.alert_active = True
+                    self.last_alert_time = current_time
         return alert_status, self.current_phase
 
 # --- Función Principal --- 
@@ -352,7 +343,7 @@ def main(args):
     
     # Preparar el layout para mostrar el vídeo y el gráfico
     display_width = width
-    display_height = height + GRAPH_HEIGHT + 50  # Altura adicional para el gráfico y margen
+    display_height = height + GRAPH_HEIGHT + 50 + 25 * len(LABEL_NAMES)  # Altura adicional para el gráfico y margen
     
     print("Iniciando bucle de inferencia...")
     try:
@@ -410,6 +401,13 @@ def main(args):
                     cv2.putText(display_img, "ALERTA: ENJABONADO CORTO", (width//2, height + 30), 
                                 cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2, cv2.LINE_AA)
                 
+                # Mostrar duración de cada fase
+                y_offset = height + 60
+                for idx, pname in LABEL_NAMES.items():
+                    dur = monitor.phase_total_durations.get(idx, 0.0)
+                    cv2.putText(display_img, f"{pname}: {dur:.1f}s", (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200,200,200), 1)
+                    y_offset += 25
+                
                 # Crear y añadir el gráfico de rendimiento en la parte inferior
                 min_soap_duration = MIN_SOAP_SECONDS
                 performance_graph = create_performance_graph(
@@ -420,7 +418,7 @@ def main(args):
                 )
                 
                 # Colocar el gráfico en la parte inferior
-                graph_y_offset = height + 50
+                graph_y_offset = height + 50 + 25 * len(LABEL_NAMES)
                 if performance_graph.shape[0] + graph_y_offset <= display_height:
                     display_img[graph_y_offset:graph_y_offset+performance_graph.shape[0], 
                                 :performance_graph.shape[1]] = performance_graph

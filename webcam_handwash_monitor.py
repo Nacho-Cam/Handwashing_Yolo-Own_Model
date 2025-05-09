@@ -20,9 +20,13 @@ except ImportError:
     print("Please ensure the path is correct and __init__.py files exist if it's a package.")
     sys.exit(1)
 
+# Add phase name mapping for 7 steps
+from phases import PHASES, get_phase_name
+
 # --- Constants ---
-YOLO_MODEL_PATH = "lavadodemanosyoloposev11yentrenamiento/yolo11n-pose-hands.pt"
-TSM_GRU_MODEL_PATH = "lavadodemanosyoloposev11yentrenamiento/best_tsm_gru.pth"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+YOLO_MODEL_PATH = os.path.join(SCRIPT_DIR, 'lavadodemanosyoloposev11yentrenamiento', 'yolo11n-pose-hands.pt')
+TSM_GRU_MODEL_PATH = os.path.join(SCRIPT_DIR, 'lavadodemanosyoloposev11yentrenamiento', 'best_tsm_gru.pth')
 
 # Default TSM-GRU parameters (will be overridden by checkpoint if available)
 SEQUENCE_LENGTH = 150
@@ -42,20 +46,27 @@ YOLO_CONF_THRESHOLD = 0.3
 HAND_KP_CONF_THRESHOLD = 0.3 # Minimum confidence to draw a keypoint
 NUM_HAND_KEYPOINTS = 21 # For yolo11n-pose-hands.pt
 
-# Phase labels - customize based on your model's classes
+# Phase labels - now for 7 classes, matching phases.py
 PHASE_LABELS = {
     0: "No Handwashing",
-    1: "Phase 1 (e.g. Wet/Soap)",
-    2: "Phase 2 (e.g. Rubbing)",
-    3: "Phase 3 (e.g. Rinsing)"
-    # Add more if your NUM_CLASSES is different
+    1: "Start/Wet Hands",
+    2: "Apply Soap",
+    3: "Rub Palms",
+    4: "Rub Back of Hands",
+    5: "Interlace Fingers",
+    6: "Clean Thumbs",
+    7: "Rinse Hands"
 }
 
-# Ideal time per phase in seconds (customize these)
+# Ideal time per phase in seconds (customize as needed)
 IDEAL_PHASE_DURATIONS = {
-    PHASE_LABELS[1]: 5,  # Example: Wet/Soap for 5s
-    PHASE_LABELS[2]: 20, # Example: Rubbing for 20s
-    PHASE_LABELS[3]: 10  # Example: Rinsing for 10s
+    PHASE_LABELS[1]: 5,   # Start/Wet Hands
+    PHASE_LABELS[2]: 5,   # Apply Soap
+    PHASE_LABELS[3]: 10,  # Rub Palms
+    PHASE_LABELS[4]: 10,  # Rub Back of Hands
+    PHASE_LABELS[5]: 10,  # Interlace Fingers
+    PHASE_LABELS[6]: 10,  # Clean Thumbs
+    PHASE_LABELS[7]: 10   # Rinse Hands
 }
 MIN_DURATION_PERCENTAGE = 0.7 # Minimum 70% of ideal time for a phase to be "Good"
 
@@ -106,109 +117,134 @@ def load_yolo_model(model_path, device):
         return None
 
 def load_tsm_gru_model(model_path, device):
-    """Loads the TSM-GRU model and its training arguments from checkpoint."""
+    global PHASE_LABELS
+    """Loads the TSM-GRU model and its training arguments from checkpoint. Handles both full checkpoint and raw state_dict."""
     if not os.path.exists(model_path):
         print(f"ERROR: TSM-GRU model not found at {model_path}")
         return None, {}
     try:
         checkpoint = torch.load(model_path, map_location=device)
-        train_args = checkpoint.get('args', {})
-        
-        # Get parameters from checkpoint args or use defaults
-        num_classes = train_args.get('num_classes', DEFAULT_NUM_CLASSES)
-        
-        model = TSM_GRU(
-            input_dim=train_args.get('input_dim', INPUT_DIM),
-            hidden_dim=train_args.get('hidden_dim', DEFAULT_HIDDEN_DIM),
-            num_classes=num_classes,
-            num_layers_gru=train_args.get('gru_layers', DEFAULT_GRU_LAYERS),
-            tsm_segments=train_args.get('tsm_segments', DEFAULT_TSM_SEGMENTS),
-            tsm_shift_div=train_args.get('tsm_shift_div', DEFAULT_TSM_SHIFT_DIV),
-            dropout=train_args.get('dropout', DEFAULT_DROPOUT),
-            bidirectional=train_args.get('bidirectional', DEFAULT_BIDIRECTIONAL),
-            use_attention=train_args.get('use_attention', DEFAULT_USE_ATTENTION),
-            use_batch_norm=train_args.get('use_batch_norm', DEFAULT_USE_BATCH_NORM)
-        )
-        model = model.to(device) # Ensure model parameters are on the correct device
-        
-        print("TSM-GRU Model effective arguments for loading:")
-        for k, v in train_args.items():
-            print(f"  TSM-GRU Arg - {k}: {v}")
-
-        try:
-            # --- Adapt state_dict keys from old model structure to new model structure ---
-            original_state_dict = checkpoint['model_state_dict']
-            adapted_state_dict = {}
-            remapped_keys_info = []
-            discarded_keys_info = []
-
-            # Expected prefixes/layers in the current TSM_GRU model
-            current_model_keys = set(model.state_dict().keys())
-            
-            for k_old, v_old in original_state_dict.items():
-                k_new = k_old
-                action = "kept"
-
-                if k_old.startswith("gru_block.gru."):
-                    k_new = k_old.replace("gru_block.gru.", "gru.")
-                    action = f"renamed to {k_new}"
-                elif k_old.startswith("fc1."): # Attempt to map old fc1 to new fc
-                    k_new = k_old.replace("fc1.", "fc.")
-                    action = f"renamed to {k_new}"
-                elif k_old.startswith("gru_block.") or k_old.startswith("fc2."): # These are likely discarded
-                    action = "discarded (no new equivalent)"
-                    discarded_keys_info.append(f"  - {k_old} (reason: {action})")
-                    continue # Skip adding to adapted_state_dict
-
-                if k_new != k_old:
-                    remapped_keys_info.append(f"  - {k_old} -> {k_new}")
-                
-                adapted_state_dict[k_new] = v_old
-            
-            if remapped_keys_info:
-                print("\nINFO: Remapping state_dict keys for TSM-GRU model compatibility:")
-                for info in remapped_keys_info:
-                    print(info)
-            if discarded_keys_info:
-                print("INFO: Discarding the following state_dict keys from old model (no new equivalent):")
-                for info in discarded_keys_info:
-                    print(info)
-
-            # Load with strict=False to accommodate structural differences
-            missing_keys, unexpected_keys = model.load_state_dict(adapted_state_dict, strict=False)
-            
-            print(f"TSM-GRU model loaded from {model_path} on {device} (with key adaptation and strict=False).")
-
-            if missing_keys:
-                print("WARNING: Some weights were missing in the checkpoint for the current model structure (randomly initialized):")
-                for key in missing_keys:
-                    print(f"  - {key}")
-            if unexpected_keys:
-                print("WARNING: Some weights from the checkpoint were not used by the current model structure (ignored):")
-                for key in unexpected_keys:
-                    print(f"  - {key}")
-            
-            print("INFO: Performance may be affected due to model structure changes since the checkpoint was saved.")
-            print("INFO: Retraining with the current model structure is recommended for optimal results.")
-
-        except RuntimeError as e:
-            print(f"Error loading TSM-GRU model state_dict even after remapping and strict=False: {e}")
-            return None, {}
-        except Exception as e: # Catch any other exception during loading
-            print(f"An unexpected error occurred during TSM-GRU model loading: {e}")
-            return None, {}
-
-        model.eval()
-        print(f"TSM-GRU model loaded from {model_path} on {device}")
-        
-        # Update PHASE_LABELS if num_classes from model is different
-        if num_classes != DEFAULT_NUM_CLASSES:
-            print(f"Updating PHASE_LABELS for {num_classes} classes.")
-            global PHASE_LABELS
-            PHASE_LABELS = {i: f"Phase {i}" for i in range(num_classes)}
-            if 0 in PHASE_LABELS: PHASE_LABELS[0] = "No Action / Other"
-        
-        return model, train_args
+        # --- PATCH: Handle both checkpoint dict and raw state_dict ---
+        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+            train_args = checkpoint.get('args', {})
+            num_classes = train_args.get('num_classes', DEFAULT_NUM_CLASSES)
+            model = TSM_GRU(
+                input_dim=train_args.get('input_dim', INPUT_DIM),
+                hidden_dim=train_args.get('hidden_dim', DEFAULT_HIDDEN_DIM),
+                num_classes=num_classes,
+                num_layers_gru=train_args.get('gru_layers', DEFAULT_GRU_LAYERS),
+                tsm_segments=train_args.get('tsm_segments', DEFAULT_TSM_SEGMENTS),
+                tsm_shift_div=train_args.get('tsm_shift_div', DEFAULT_TSM_SHIFT_DIV),
+                dropout=train_args.get('dropout', DEFAULT_DROPOUT),
+                bidirectional=train_args.get('bidirectional', DEFAULT_BIDIRECTIONAL),
+                use_attention=train_args.get('use_attention', DEFAULT_USE_ATTENTION),
+                use_batch_norm=train_args.get('use_batch_norm', DEFAULT_USE_BATCH_NORM)
+            )
+            model = model.to(device)
+            print("TSM-GRU Model effective arguments for loading:")
+            for k, v in train_args.items():
+                print(f"  TSM-GRU Arg - {k}: {v}")
+            try:
+                original_state_dict = checkpoint['model_state_dict']
+                adapted_state_dict = {}
+                remapped_keys_info = []
+                discarded_keys_info = []
+                current_model_keys = set(model.state_dict().keys())
+                for k_old, v_old in original_state_dict.items():
+                    k_new = k_old
+                    action = "kept"
+                    if k_old.startswith("gru_block.gru."):
+                        k_new = k_old.replace("gru_block.gru.", "gru.")
+                        action = f"renamed to {k_new}"
+                    elif k_old.startswith("fc1."):
+                        k_new = k_old.replace("fc1.", "fc.")
+                        action = f"renamed to {k_new}"
+                    elif k_old.startswith("gru_block.") or k_old.startswith("fc2."):
+                        action = "discarded (no new equivalent)"
+                        discarded_keys_info.append(f"  - {k_old} (reason: {action})")
+                        continue
+                    if k_new != k_old:
+                        remapped_keys_info.append(f"  - {k_old} -> {k_new}")
+                    adapted_state_dict[k_new] = v_old
+                if remapped_keys_info:
+                    print("\nINFO: Remapping state_dict keys for TSM-GRU model compatibility:")
+                    for info in remapped_keys_info:
+                        print(info)
+                if discarded_keys_info:
+                    print("INFO: Discarding the following state_dict keys from old model (no new equivalent):")
+                    for info in discarded_keys_info:
+                        print(info)
+                missing_keys, unexpected_keys = model.load_state_dict(adapted_state_dict, strict=False)
+                print(f"TSM-GRU model loaded from {model_path} on {device} (with key adaptation and strict=False).")
+                if missing_keys:
+                    print("WARNING: Some weights were missing in the checkpoint for the current model structure (randomly initialized):")
+                    for key in missing_keys:
+                        print(f"  - {key}")
+                if unexpected_keys:
+                    print("WARNING: Some weights from the checkpoint were not used by the current model structure (ignored):")
+                    for key in unexpected_keys:
+                        print(f"  - {key}")
+                print("INFO: Performance may be affected due to model structure changes since the checkpoint was saved.")
+                print("INFO: Retraining with the current model structure is recommended for optimal results.")
+            except RuntimeError as e:
+                print(f"Error loading TSM-GRU model state_dict even after remapping and strict=False: {e}")
+                return None, {}
+            except Exception as e:
+                print(f"An unexpected error occurred during TSM-GRU model loading: {e}")
+                return None, {}
+            model.eval()
+            print(f"TSM-GRU model loaded from {model_path} on {device}")
+            if num_classes != DEFAULT_NUM_CLASSES:
+                print(f"Updating PHASE_LABELS for {num_classes} classes.")
+                PHASE_LABELS = {i: f"Phase {i}" for i in range(num_classes)}
+                if 0 in PHASE_LABELS: PHASE_LABELS[0] = "No Action / Other"
+            return model, train_args
+        else:
+            # Assume raw state_dict (no args, use defaults)
+            print("INFO: Loaded raw state_dict (no checkpoint dictionary). Attempting to infer num_classes from state_dict.")
+            # Try to infer num_classes from fc.weight or fc.bias
+            num_classes = DEFAULT_NUM_CLASSES
+            if 'fc.weight' in checkpoint:
+                num_classes = checkpoint['fc.weight'].shape[0]
+            elif 'fc.bias' in checkpoint:
+                num_classes = checkpoint['fc.bias'].shape[0]
+            else:
+                print("WARNING: Could not infer num_classes from state_dict. Using default.")
+            print(f"INFO: Inferred num_classes = {num_classes}")
+            model = TSM_GRU(
+                input_dim=INPUT_DIM,
+                hidden_dim=DEFAULT_HIDDEN_DIM,
+                num_classes=num_classes,
+                num_layers_gru=DEFAULT_GRU_LAYERS,
+                tsm_segments=DEFAULT_TSM_SEGMENTS,
+                tsm_shift_div=DEFAULT_TSM_SHIFT_DIV,
+                dropout=DEFAULT_DROPOUT,
+                bidirectional=DEFAULT_BIDIRECTIONAL,
+                use_attention=DEFAULT_USE_ATTENTION,
+                use_batch_norm=DEFAULT_USE_BATCH_NORM
+            )
+            model = model.to(device)
+            try:
+                missing_keys, unexpected_keys = model.load_state_dict(checkpoint, strict=False)
+                print(f"TSM-GRU model loaded from {model_path} on {device} (raw state_dict, strict=False).")
+                if missing_keys:
+                    print("WARNING: Some weights were missing in the checkpoint for the current model structure (randomly initialized):")
+                    for key in missing_keys:
+                        print(f"  - {key}")
+                if unexpected_keys:
+                    print("WARNING: Some weights from the checkpoint were not used by the current model structure (ignored):")
+                    for key in unexpected_keys:
+                        print(f"  - {key}")
+            except Exception as e:
+                print(f"Error loading raw state_dict for TSM-GRU: {e}")
+                return None, {}
+            model.eval()
+            # Update PHASE_LABELS if needed
+            if num_classes != DEFAULT_NUM_CLASSES:
+                print(f"Updating PHASE_LABELS for {num_classes} classes.")
+                PHASE_LABELS = {i: f"Phase {i}" for i in range(num_classes)}
+                if 0 in PHASE_LABELS: PHASE_LABELS[0] = "No Action / Other"
+            return model, {}
     except Exception as e:
         print(f"Error loading TSM-GRU model: {e}")
         return None, {}

@@ -1,4 +1,3 @@
-\
 import cv2
 import numpy as np
 import torch
@@ -7,40 +6,40 @@ import time
 import os
 from collections import deque
 from flask import Flask, Response, render_template_string
-import importlib.util # To load modules from subdirectory
+from phases import PHASES
 
-# --- Configuration ---\n# Adjust these paths if main_app.py is not in the project root or if models are elsewhere
-DEFAULT_TSM_MODEL_PATH = \'lavadodemanosyoloposev11yentrenamiento/best_tsm_gru.pth\'
-DEFAULT_YOLO_MODEL_PATH = \'lavadodemanosyoloposev11yentrenamiento/yolo11n-pose-hands.pt\' # Fine-tuned model
+# --- Configuration ---
+# Adjust these paths if main_app.py is not in the project root or if models are elsewhere
+DEFAULT_TSM_MODEL_PATH = 'lavadodemanosyoloposev11yentrenamiento/best_tsm_gru.pth'
+DEFAULT_YOLO_MODEL_PATH = 'lavadodemanosyoloposev11yentrenamiento/yolo11n-pose-hands.pt' # Fine-tuned model
 
 # Import TSM_GRU model from the subdirectory
-TSM_GRU = None
 try:
-    # Construct an absolute path to the module file based on this script's location
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    module_path = os.path.join(base_dir, \'lavadodemanosyoloposev11yentrenamiento\', \'model\', \'tsm_gru.py\')
-    
-    spec = importlib.util.spec_from_file_location("tsm_gru_module", module_path)
-    if spec and spec.loader:
-        tsm_gru_module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(tsm_gru_module)
-        TSM_GRU = tsm_gru_module.TSM_GRU
-    else:
-        raise ImportError("Could not load spec for TSM_GRU module.")
+    from lavadodemanosyoloposev11yentrenamiento.model.tsm_gru import TSM_GRU
 except ImportError as e:
     print(f"Error importing TSM_GRU: {e}")
     print("Make sure lavadodemanosyoloposev11yentrenamiento/model/tsm_gru.py exists and is correct.")
-    # Allow app to start, generate_frames will handle model load failure.
+    TSM_GRU = None
 
-# Feature dimension should match the TSM-GRU model\'s training
+# Feature dimension should match the TSM-GRU model's training
 EXPECTED_FEATURE_DIM = 63 # For 21 hand keypoints (yolo11n-pose-hands.pt)
 
 # These might be updated from the model checkpoint
 SEQUENCE_LENGTH = 150
 TARGET_FPS = 10 # Reduced for web streaming example
 
-LABEL_NAMES = {0: \'Mojar\', 1: \'Enjabonado\', 2: \'Frotado\', 3: \'Aclarado\', -1: \'Iniciando...\'}
-LABEL_COLORS = {0: (255, 0, 0), 1: (0, 255, 0), 2: (0, 0, 255), 3: (255, 255, 0), -1: (128, 128, 128)}
+LABEL_NAMES = {i: name for i, name in enumerate(PHASES)}
+LABEL_NAMES[-1] = 'Iniciando...'
+LABEL_COLORS = {
+    0: (255, 0, 0),
+    1: (0, 255, 0),
+    2: (0, 0, 255),
+    3: (255, 255, 0),
+    4: (255, 0, 255),
+    5: (0, 255, 255),
+    6: (128, 128, 0),
+    -1: (128, 128, 128)
+}
 
 # --- Flask App Initialization ---
 app = Flask(__name__)
@@ -55,7 +54,7 @@ sequence_length_global = SEQUENCE_LENGTH # Will be updated from checkpoint if po
 
 def load_models():
     global tsm_gru_model_global, yolo_model_global, device_global, clahe_global
-    global model_input_dim_global, sequence_length_global
+    global model_input_dim_global, sequence_length_global, LABEL_NAMES
 
     if tsm_gru_model_global is not None and yolo_model_global is not None:
         return True # Models already loaded
@@ -74,31 +73,55 @@ def load_models():
         return False
     try:
         checkpoint = torch.load(tsm_model_path_abs, map_location=device_global)
-        model_args = checkpoint.get(\'args\', {})
-        
-        model_input_dim_global = model_args.get(\'input_dim\', EXPECTED_FEATURE_DIM)
-        num_classes = model_args.get(\'num_classes\', 4)
-        
-        # Update SEQUENCE_LENGTH from checkpoint if available
-        train_seq_len = model_args.get(\'seq_len\', sequence_length_global)
-        if train_seq_len != sequence_length_global:
-            print(f"Updating SEQUENCE_LENGTH from {sequence_length_global} to {train_seq_len} based on model checkpoint.")
-            sequence_length_global = train_seq_len
-
-        tsm_gru_model_global = TSM_GRU(
-            input_dim=model_input_dim_global,
-            hidden_dim=model_args.get(\'hidden_dim\', 256),
-            num_classes=num_classes,
-            num_layers_gru=model_args.get(\'gru_layers\', 2),
-            tsm_segments=model_args.get(\'tsm_segments\', 8),
-            tsm_shift_div=model_args.get(\'tsm_shift_div\', 3),
-            bidirectional=model_args.get(\'bidirectional\', False),
-            use_attention=model_args.get(\'use_attention\', False),
-            dropout=0.0
-        ).to(device_global)
-        tsm_gru_model_global.load_state_dict(checkpoint[\'model_state_dict\'])
-        tsm_gru_model_global.eval()
-        print(f"TSM-GRU model loaded. Expecting input_dim: {model_input_dim_global}, seq_len: {sequence_length_global}")
+        # --- PATCH: Handle both checkpoint dict and raw state_dict ---
+        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+            model_args = checkpoint.get('args', {})
+            model_input_dim_global = model_args.get('input_dim', EXPECTED_FEATURE_DIM)
+            num_classes = model_args.get('num_classes', 7)
+            train_seq_len = model_args.get('seq_len', sequence_length_global)
+            if train_seq_len != sequence_length_global:
+                print(f"Updating SEQUENCE_LENGTH from {sequence_length_global} to {train_seq_len} based on model checkpoint.")
+                sequence_length_global = train_seq_len
+            tsm_gru_model_global = TSM_GRU(
+                input_dim=model_input_dim_global,
+                hidden_dim=model_args.get('hidden_dim', 256),
+                num_classes=num_classes,
+                num_layers_gru=model_args.get('gru_layers', 2),
+                tsm_segments=model_args.get('tsm_segments', 8),
+                tsm_shift_div=model_args.get('tsm_shift_div', 3),
+                bidirectional=model_args.get('bidirectional', False),
+                use_attention=model_args.get('use_attention', False),
+                dropout=model_args.get('dropout', 0.0)
+            ).to(device_global)
+            tsm_gru_model_global.load_state_dict(checkpoint['model_state_dict'], strict=False)
+            tsm_gru_model_global.eval()
+            print(f"TSM-GRU model loaded. Expecting input_dim: {model_input_dim_global}, seq_len: {sequence_length_global}")
+        else:
+            # Assume raw state_dict (no args, use defaults)
+            print("INFO: Loaded raw state_dict (no checkpoint dictionary). Attempting to infer num_classes from state_dict.")
+            num_classes = 7
+            if 'fc.weight' in checkpoint:
+                num_classes = checkpoint['fc.weight'].shape[0]
+            elif 'fc.bias' in checkpoint:
+                num_classes = checkpoint['fc.bias'].shape[0]
+            print(f"INFO: Inferred num_classes = {num_classes}")
+            tsm_gru_model_global = TSM_GRU(
+                input_dim=EXPECTED_FEATURE_DIM,
+                hidden_dim=256,
+                num_classes=num_classes,
+                num_layers_gru=2,
+                tsm_segments=8,
+                tsm_shift_div=3,
+                bidirectional=False,
+                use_attention=False,
+                dropout=0.0
+            ).to(device_global)
+            tsm_gru_model_global.load_state_dict(checkpoint, strict=False)
+            tsm_gru_model_global.eval()
+            print(f"TSM-GRU model loaded from raw state_dict. Expecting input_dim: {EXPECTED_FEATURE_DIM}, seq_len: {sequence_length_global}")
+        # Update LABEL_NAMES if num_classes changed
+        LABEL_NAMES = {i: f"Phase {i}" for i in range(num_classes)}
+        LABEL_NAMES[-1] = 'Iniciando...'
     except Exception as e:
         print(f"Error loading TSM-GRU model: {e}")
         tsm_gru_model_global = None
@@ -145,14 +168,14 @@ def generate_frames():
         error_img = np.zeros((480, 640, 3), dtype=np.uint8)
         cv2.putText(error_img, "Error: Models not loaded.", (50, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
         while True:
-            ret, buffer = cv2.imencode(\'.jpg\', error_img)
+            ret, buffer = cv2.imencode('.jpg', error_img)
             frame_bytes = buffer.tobytes()
-            yield (b\'--frame\\r\\n\'
-                   b\'Content-Type: image/jpeg\\r\\n\\r\\n\' + frame_bytes + b\'\\r\\n\')
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
             time.sleep(1) # Avoid busy loop
 
     # VIDEO SOURCE:
-    # For Render, you\'ll need to provide a video file.
+    # For Render, you'll need to provide a video file.
     # Upload a video (e.g., "sample_video.mp4") with your project.
     video_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sample_video.mp4")
     
@@ -161,7 +184,8 @@ def generate_frames():
         cap = cv2.VideoCapture(video_path)
         print(f"Processing video file: {video_path}")
     else:
-        print(f"Video file not found: {video_path}. Using dummy frames.")
+        print(f"Video file not found: {video_path}. Using webcam.")
+        cap = cv2.VideoCapture(0)  # Use default webcam
 
     dummy_frame_counter = 0
     max_dummy_frames = 300 
@@ -209,40 +233,40 @@ def generate_frames():
         color = LABEL_COLORS.get(last_phase_prediction, (255, 255, 255))
         cv2.putText(annotated_frame, f"Fase: {phase_name}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2, cv2.LINE_AA)
 
-        ret, buffer = cv2.imencode(\'.jpg\', annotated_frame)
+        ret, buffer = cv2.imencode('.jpg', annotated_frame)
         if not ret:
             continue # Skip frame if encoding failed
         frame_bytes = buffer.tobytes()
         
-        yield (b\'--frame\\r\\n\'
-               b\'Content-Type: image/jpeg\\r\\n\\r\\n\' + frame_bytes + b\'\\r\\n\')
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
         time.sleep(1.0 / TARGET_FPS)
     
     if cap:
         cap.release()
 
-@app.route(\'/\')
+@app.route('/')
 def index():
-    return render_template_string(\'\'\'
+    return render_template_string('''
     <html>
         <head><title>Handwash Monitor</title></head>
         <body>
             <h1>Handwash Monitor Stream</h1>
-            <img src="{{ url_for(\'video_feed\') }}" width="640" height="480">
+            <img src="{{ url_for('video_feed') }}" width="640" height="480">
         </body>
-    </html>\'\'\')
+    </html>''')
 
-@app.route(\'/video_feed\')
+@app.route('/video_feed')
 def video_feed():
     return Response(generate_frames(),
-                    mimetype=\'multipart/x-mixed-replace; boundary=frame\')
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
 
 # Gunicorn will run the app, so this is mainly for local testing.
 # The load_models() call is deferred to the first request to generate_frames
-# to avoid issues with Gunicorn\'s multiple worker startup.
-if __name__ == \'__main__\':
+# to avoid issues with Gunicorn's multiple worker startup.
+if __name__ == '__main__':
     print("Starting Flask app for local testing...")
     # For local testing, models can be loaded at startup.
-    # However, for Gunicorn, it\'s better to load them lazily or in a post_fork hook.
+    # However, for Gunicorn, it's better to load them lazily or in a post_fork hook.
     # load_models() # Deferred to first request in generate_frames
-    app.run(host=\'0.0.0.0\', port=5001, debug=False) # Use a different port like 5001 for local
+    app.run(host='0.0.0.0', port=5001, debug=False) # Use a different port like 5001 for local
