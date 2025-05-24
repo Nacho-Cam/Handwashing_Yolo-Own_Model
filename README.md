@@ -59,6 +59,37 @@ Este proyecto implementa un sistema completo para la supervisión automática de
 
     > **Nota**: Para versiones específicas de PyTorch con soporte CUDA, instala PyTorch por separado siguiendo las instrucciones en [pytorch.org](https://pytorch.org/).
 
+> **Nota importante (mayo 2025):**
+> Actualmente el modelo TSM-GRU **no está funcionando** en la inferencia en tiempo real. Por ahora, la evaluación de la calidad del lavado de manos se realiza únicamente usando el modelo YOLO pose, midiendo el tiempo de presencia simultánea de ambas manos en pantalla. Si ambas manos están presentes al menos 20 segundos, el lavado se considera correcto; de lo contrario, se genera una alerta.
+
+## Inferencia en Tiempo Real Basada Solo en YOLO (sin TSM-GRU)
+
+A partir de mayo 2025, el script `inference.py` permite realizar inferencia en tiempo real para supervisión de lavado de manos **sin necesidad de usar el modelo TSM-GRU**. Ahora, la calidad del lavado se evalúa únicamente en función del tiempo que ambas manos están presentes en pantalla.
+
+**¿Cómo funciona?**
+- Se utiliza únicamente el modelo YOLO pose para detectar ambas manos.
+- Si ambas manos están presentes en pantalla durante al menos 20 segundos, se considera un lavado correcto ("OK").
+- Si el tiempo es menor, se publica una alerta ("ALERTA_DURACION_INSUFICIENTE") vía MQTT.
+- El temporizador y el estado se muestran en la ventana de video.
+
+### Ejecución
+
+Desde la raíz del proyecto:
+```bash
+python lavadodemanosyoloposev11yentrenamiento/inference.py --show-video
+```
+
+Parámetros opcionales:
+- `--yolo-model`: Ruta al modelo YOLO pose afinado para manos (por defecto: `yolo11n-pose-hands.pt`)
+- `--webcam-index`: Índice de la cámara a usar (por defecto: 0)
+- `--mqtt-broker` y `--mqtt-port`: Configuración del broker MQTT
+
+**Nota:**
+- Ya no es necesario el archivo `best_tsm_gru.pth` ni la extracción de keypoints para la inferencia en tiempo real básica.
+- El modelo YOLO pose debe estar entrenado o afinado para detectar ambas manos y sus keypoints.
+
+---
+
 ## Pipeline de Entrenamiento Automatizado
 
 El script `train_handwash_pipeline.py` automatiza la mayoría de los pasos. Se recomienda usar este script para un flujo de trabajo consistente.
@@ -188,34 +219,6 @@ python webcam_handwash_monitor.py \
     --tsm-gru-model lavadodemanosyoloposev11yentrenamiento/best_tsm_gru.pth \
     --webcam-index 0
 ```
-
----
-
-## Inferencia en Tiempo Real Basada Solo en YOLO (sin TSM-GRU)
-
-A partir de mayo 2025, el script `inference.py` permite realizar inferencia en tiempo real para supervisión de lavado de manos **sin necesidad de usar el modelo TSM-GRU**. Ahora, la calidad del lavado se evalúa únicamente en función del tiempo que ambas manos están presentes en pantalla.
-
-**¿Cómo funciona?**
-- Se utiliza únicamente el modelo YOLO pose para detectar ambas manos.
-- Si ambas manos están presentes en pantalla durante al menos 20 segundos, se considera un lavado correcto ("OK").
-- Si el tiempo es menor, se publica una alerta ("ALERTA_DURACION_INSUFICIENTE") vía MQTT.
-- El temporizador y el estado se muestran en la ventana de video.
-
-### Ejecución
-
-Desde la raíz del proyecto:
-```bash
-python lavadodemanosyoloposev11yentrenamiento/inference.py --show-video
-```
-
-Parámetros opcionales:
-- `--yolo-model`: Ruta al modelo YOLO pose afinado para manos (por defecto: `yolo11n-pose-hands.pt`)
-- `--webcam-index`: Índice de la cámara a usar (por defecto: 0)
-- `--mqtt-broker` y `--mqtt-port`: Configuración del broker MQTT
-
-**Nota:**
-- Ya no es necesario el archivo `best_tsm_gru.pth` ni la extracción de keypoints para la inferencia en tiempo real básica.
-- El modelo YOLO pose debe estar entrenado o afinado para detectar ambas manos y sus keypoints.
 
 ---
 
